@@ -1,5 +1,5 @@
 /* ============================================
- * Doom-SNES style raycaster (optimized)
+ * Doom-SNES style raycaster (IRQ-driven DMA)
  * 65816: DDA raycasting + input handling
  * GSU: pixel plotting only (reads pre-computed column data)
  *
@@ -9,7 +9,10 @@
  *   3. For each column, compute drawStart, drawEnd, wallColor
  *   4. Write column data to GSU RAM at $70:0000 (60 bytes)
  *   5. Start GSU, wait for completion
- *   6. DMA tile framebuffer from $70:0400 to VRAM
+ *   6. DMA happens automatically via Doom-style IRQ system:
+ *      - Bottom IRQ (scanline 176): forced blank + DMA 12800 bytes
+ *      - Top IRQ (scanline 47): re-enable display
+ *      - Main loop syncs via waitDMADone() flag
  *
  * Optimizations vs previous version:
  *   - 20 rays instead of 40 (8px wide strips vs 4px)
@@ -44,15 +47,14 @@
 #define PAD_A      0x0080
 
 /* External assembly functions (in data.asm) */
-extern void initMode3Display(void);
+extern void initMode7Display(void);
 extern void initGSU(void);
 extern void startGSU(void);
 extern void disableNMI(void);
-extern void waitVBlankSimple(void);
-extern void restoreDisplayRegs(void);
+extern void setupIRQ(void);
+extern void waitDMADone(void);
 extern u16  readJoypad(void);
 extern void writeColumnData(void);
-extern void dmaFramebuffer(void);
 
 /* Column data: 20 columns x 3 bytes = 60 bytes
  * Written by C, copied to $70:0000 by writeColumnData() */
@@ -457,21 +459,40 @@ void castRays(void) {
 }
 
 /* ============================================
- * Main loop
+ * Main loop -- Doom-style IRQ-driven DMA
+ *
+ * Flow:
+ *   1. handleInput() -- read joypad, update player
+ *   2. castRays() -- DDA raycaster computes column data
+ *   3. writeColumnData() -- copy 60 bytes to $70:0000
+ *   4. startGSU() -- GSU renders pixels into $70:0400
+ *   5. waitDMADone() -- spin until bottom IRQ has DMA'd frame
+ *   6. Loop back (IRQ system handles DMA automatically)
  * ============================================ */
 int main(void) {
-    initMode3Display();
+    initMode7Display();
     initGSU();
     disableNMI();
     initPlayer();
 
+    /* First frame: render initial data before enabling IRQs */
+    castRays();
+    writeColumnData();
+    startGSU();
+
+    /* Enable Doom-style IRQ system */
+    setupIRQ();
+
     while (1) {
+        /* Wait for previous frame's DMA to complete */
+        waitDMADone();
+
+        /* Process input and render next frame */
         handleInput();
         castRays();
         writeColumnData();
         startGSU();
-        waitVBlankSimple();  /* let current frame finish displaying */
-        dmaFramebuffer();    /* forced blank + DMA during VBlank + overflow */
+        /* DMA will happen automatically when bottom IRQ fires */
     }
 
     return 0;

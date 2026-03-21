@@ -33,7 +33,7 @@
   BRK EmptyHandler
   ABORT EmptyHandler
   NMI VBlank
-  IRQ EmptyHandler
+  IRQ IRQTrampoline
 .ENDNATIVEVECTOR
 
 .SNESEMUVECTOR
