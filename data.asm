@@ -553,47 +553,89 @@ dmaFramebuffer:
     php
     sep #$20
     rep #$10
-    ; Force blank
-    lda #$80
-    sta.l $2100
-    ; Give SNES RAM access
+
+    ; Give SNES RAM access for DMA
     lda #$17
     sta.l $303A
-    ; VMAIN: word increment
-    lda #$80
-    sta.l $2115
-    ; VRAM addr = $0000
-    rep #$20
-    lda #$0000
-    sta.l $2116
-    sep #$20
-    ; DMA setup: word-mode to $2118/$2119
+
+    ; DMA setup: word-mode to $2118/$2119 (same for all 3 batches)
     lda #$01
     sta.l $4300          ; DMAP: 2-register word write
     lda #$18
     sta.l $4301          ; BBAD: $2118 (VMDATAL)
-    rep #$20
-    lda #$0400
-    sta.l $4302
-    sep #$20
     lda #$70
-    sta.l $4304
+    sta.l $4304          ; source bank $70
+    lda #$80
+    sta.l $2115          ; VMAIN: word increment
+
+    ; === Batch 1: rows 0-3 (5120 bytes) during VBlank ===
+@WV1:
+    lda.l $4212
+    and #$80
+    beq @WV1
     rep #$20
-    lda #TILE_DATA_SIZE  ; 15360 bytes
+    lda #$0000
+    sta.l $2116          ; VRAM addr
+    lda #$0400
+    sta.l $4302          ; source: $70:0400
+    lda #5120
     sta.l $4305
     sep #$20
     lda #$01
     sta.l $420B
+
+    ; === Batch 2: rows 4-7 (5120 bytes) during next VBlank ===
+@WNV2:
+    lda.l $4212
+    and #$80
+    bne @WNV2
+@WV2:
+    lda.l $4212
+    and #$80
+    beq @WV2
+    rep #$20
+    lda #$0000 + 2560    ; VRAM word addr after batch 1
+    sta.l $2116
+    lda #$0400 + 5120    ; source offset after batch 1
+    sta.l $4302
+    lda #5120
+    sta.l $4305
+    sep #$20
+    lda #$01
+    sta.l $420B
+
+    ; === Batch 3: rows 8-11 (5120 bytes) during next VBlank ===
+@WNV3:
+    lda.l $4212
+    and #$80
+    bne @WNV3
+@WV3:
+    lda.l $4212
+    and #$80
+    beq @WV3
+    rep #$20
+    lda #$0000 + 5120    ; VRAM word addr after batch 2
+    sta.l $2116
+    lda #$0400 + 10240   ; source offset after batch 2
+    sta.l $4302
+    lda #5120
+    sta.l $4305
+    sep #$20
+    lda #$01
+    sta.l $420B
+
     ; Give GSU back RAM
     lda #$1F
     sta.l $303A
-    ; Screen on with Mode 3
+
+    ; Ensure display regs correct
     lda #$03
     sta.l $2105          ; Mode 3
     lda #$01
     sta.l $212C          ; BG1
     lda #$0F
     sta.l $2100
+
     plp
     rtl
 
