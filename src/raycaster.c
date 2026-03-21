@@ -470,9 +470,8 @@ int main(void) {
         castRays();
         writeColumnData();
         startGSU();
-        waitVBlankSimple();
-        dmaFramebuffer();
-        restoreDisplayRegs();
+        waitVBlankSimple();  /* let current frame finish displaying */
+        dmaFramebuffer();    /* forced blank + DMA during VBlank + overflow */
     }
 
     return 0;
