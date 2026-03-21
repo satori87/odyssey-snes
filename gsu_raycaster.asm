@@ -1,10 +1,10 @@
 ; ============================================
-; SuperFX Pixel Plotter (Doom SNES style)
+; SuperFX Pixel Plotter (Doom SNES style, optimized)
 ; NO math on GSU -- reads pre-computed column data from $70:0000,
 ; writes pixel data directly into tile-formatted framebuffer at $70:0400.
 ;
-; Column data format (120 bytes at $70:0000):
-;   3 bytes per column x 40 columns
+; Column data format (60 bytes at $70:0000):
+;   3 bytes per column x 20 columns
 ;   byte 0: drawStart (Y coord, 0-79)
 ;   byte 1: drawEnd   (Y coord, 0-79)
 ;   byte 2: wallColor (palette index)
@@ -13,7 +13,8 @@
 ;   200 tiles (20x10), 64 bytes each = 12800 bytes
 ;   Pixel within tile: row*8 + col (Mode 7, 1 byte/pixel)
 ;
-; Screen: 160x80 = 20x10 tiles, column C -> screenX = C*4
+; Screen: 160x80 = 20x10 tiles, column C -> screenX = C*8
+; Each column is 8 pixels wide = one full tile column width
 ;
 ; Notes on wla-superfx assembler:
 ;   - ldb/stb/ldw/stw only work with R0-R11 (not R12-R15)
@@ -37,7 +38,7 @@
 .SECTION "GSUCode" SUPERFREE
 
 .define SCREEN_H     80
-.define NUM_COLS     40
+.define NUM_COLS     20
 .define CEIL_COLOR   16
 .define FLOOR_COLOR  17
 .define COL_DATA     $0000
@@ -60,7 +61,7 @@
 ;   R7  = wallColor
 ;   R8  = Y (0..79)
 ;   R9  = current color to write
-;   R10 = px (pixel X within tile: 0 or 4)
+;   R10 = px (pixel X within tile: 0, always 0 since columns are 8px = full tile)
 ;   R11 = general temp
 ; -------------------------------------------------------
 
@@ -105,13 +106,7 @@ _col_loop:
     ldw (r1)                ; r0 = screenX
     move r11, r0
 
-    ; --- px = screenX & 7 ---
-    iwt r10, #7
-    from r11
-    AND r10                 ; r0 = screenX & 7
-    move r10, r0            ; r10 = px (0 or 4)
-
-    ; --- tileX = screenX >> 3, save to RAM ---
+    ; --- tileX = screenX >> 3 (= col, since screenX = col*8) ---
     from r11
     to r0
     lsr
@@ -119,6 +114,9 @@ _col_loop:
     lsr                     ; r0 = screenX / 8 = tileX
     iwt r1, #VAR_TILEX
     stw (r1)
+
+    ; --- px is always 0: each column fills a full 8-pixel tile width ---
+    iwt r10, #0
 
     ; --- Draw vertical strip Y=0..79 ---
     iwt r8, #0              ; Y = 0
@@ -168,7 +166,7 @@ _tilerow_loop:
     to r4
     add r0                  ; r4 = tileBase
 
-    ; --- 8 pixel rows ---
+    ; --- 8 pixel rows per tile ---
     iwt r1, #0              ; r1 = py
 
 _pixrow_loop:
@@ -197,18 +195,27 @@ _pw_floor:
 
 _pw_write:
     ; address = tileBase + py*8 + px
+    ; Since px=0 always: address = tileBase + py*8
     from r1
     to r0
     add r1                  ; py*2
     add r0                  ; py*4
     add r0                  ; py*8
-    add r10                 ; + px
+    ; px is 0, skip add r10
     from r4
     to r3
-    add r0                  ; r3 = write address
+    add r0                  ; r3 = write address = tileBase + py*8
 
-    ; Write 4 pixels
+    ; Write 8 pixels (full tile width)
     move r0, r9
+    stb (r3)
+    inc r3
+    stb (r3)
+    inc r3
+    stb (r3)
+    inc r3
+    stb (r3)
+    inc r3
     stb (r3)
     inc r3
     stb (r3)
@@ -243,7 +250,7 @@ _pw_write:
 
     iwt r1, #VAR_SCREENX
     ldw (r1)
-    add #4
+    add #8                  ; 8 pixels per column (was 4)
     stw (r1)
 
     ; Check done: if col < NUM_COLS, loop

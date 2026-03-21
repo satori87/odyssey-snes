@@ -270,7 +270,7 @@ startGSU:
 @GSUStubEnd:
 
 ;; -------------------------------------------------------
-;; writeColumnData -- Copy columnData[120] from C global to $70:0000
+;; writeColumnData -- Copy columnData[60] from C global to $70:0000
 ;; -------------------------------------------------------
 writeColumnData:
     php
@@ -283,7 +283,7 @@ writeColumnData:
     lda.l columnData,x
     sta.l $700000,x
     inx
-    cpx #$0078           ; 120 bytes (40 cols x 3 bytes)
+    cpx #$003C           ; 60 bytes (20 cols x 3 bytes)
     bne @WCD_Loop
 
     plb

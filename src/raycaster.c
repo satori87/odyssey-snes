@@ -1,15 +1,21 @@
 /* ============================================
- * Doom-SNES style raycaster
+ * Doom-SNES style raycaster (optimized)
  * 65816: DDA raycasting + input handling
  * GSU: pixel plotting only (reads pre-computed column data)
  *
  * Architecture:
  *   1. 65816 handles d-pad input (rotation, movement with collision)
- *   2. 65816 runs DDA raycaster for 40 columns
+ *   2. 65816 runs DDA raycaster for 20 columns (8px wide each)
  *   3. For each column, compute drawStart, drawEnd, wallColor
- *   4. Write column data to GSU RAM at $70:0000 (120 bytes)
+ *   4. Write column data to GSU RAM at $70:0000 (60 bytes)
  *   5. Start GSU, wait for completion
  *   6. DMA tile framebuffer from $70:0400 to VRAM
+ *
+ * Optimizations vs previous version:
+ *   - 20 rays instead of 40 (8px wide strips vs 4px)
+ *   - Reciprocal lookup table eliminates fp_div in DDA
+ *   - Precomputed cameraX values
+ *   - Simplified sideDist using shift instead of full fp_mul
  * ============================================ */
 
 #include <snes.h>
@@ -20,8 +26,8 @@
 #define SCREEN_W  160
 #define SCREEN_H  80
 #define HALF_H    40
-#define NUM_COLS  40
-#define COL_W     4
+#define NUM_COLS  20
+#define COL_W     8
 #define NUM_TILES 200
 #define MAX_STEPS 24
 
@@ -48,9 +54,9 @@ extern u16  readJoypad(void);
 extern void writeColumnData(void);
 extern void dmaFramebuffer(void);
 
-/* Column data: 40 columns x 3 bytes = 120 bytes
+/* Column data: 20 columns x 3 bytes = 60 bytes
  * Written by C, copied to $70:0000 by writeColumnData() */
-u8 columnData[120];
+u8 columnData[60];
 
 /* Player state (8.8 fixed point) */
 s16 posX;           /* position X */
@@ -60,6 +66,55 @@ s16 dirY;           /* direction vector Y */
 s16 planeX;         /* camera plane X */
 s16 planeY;         /* camera plane Y */
 u8  playerAngle;    /* 0-255, indexes sin/cos tables */
+
+/* ============================================
+ * Reciprocal lookup table (eliminates fp_div)
+ * recip_table[n] = 65536 / n (clamped to 0x7FFF)
+ * Used as: deltaDist = recip_table[|rayDir|]
+ * Since 1.0/rayDir in 8.8 = 256/rayDir = (65536/rayDir) >> 8,
+ * but we want |256/rayDir| in 8.8 = 65536/|rayDir|.
+ * ============================================ */
+const u16 recip_table[256] = {
+    32767, 32767, 32767, 21845, 16384, 13107, 10922, 9362,
+    8192, 7281, 6553, 5957, 5461, 5041, 4681, 4369,
+    4096, 3855, 3640, 3449, 3276, 3120, 2978, 2849,
+    2730, 2621, 2520, 2427, 2340, 2259, 2184, 2114,
+    2048, 1985, 1927, 1872, 1820, 1771, 1724, 1680,
+    1638, 1598, 1560, 1524, 1489, 1456, 1424, 1394,
+    1365, 1337, 1310, 1285, 1260, 1236, 1213, 1191,
+    1170, 1149, 1129, 1110, 1092, 1074, 1057, 1040,
+    1024, 1008, 992, 978, 963, 949, 936, 923,
+    910, 897, 885, 873, 862, 851, 840, 829,
+    819, 809, 799, 789, 780, 771, 762, 753,
+    744, 736, 728, 720, 712, 704, 697, 689,
+    682, 675, 668, 661, 655, 648, 642, 636,
+    630, 624, 618, 612, 606, 601, 595, 590,
+    585, 579, 574, 569, 564, 560, 555, 550,
+    546, 541, 537, 532, 528, 524, 520, 516,
+    512, 508, 504, 500, 496, 492, 489, 485,
+    481, 478, 474, 471, 468, 464, 461, 458,
+    455, 451, 448, 445, 442, 439, 436, 434,
+    431, 428, 425, 422, 420, 417, 414, 412,
+    409, 407, 404, 402, 399, 397, 394, 392,
+    390, 387, 385, 383, 381, 378, 376, 374,
+    372, 370, 368, 366, 364, 362, 360, 358,
+    356, 354, 352, 350, 348, 346, 344, 343,
+    341, 339, 337, 336, 334, 332, 330, 329,
+    327, 326, 324, 322, 321, 319, 318, 316,
+    315, 313, 312, 310, 309, 307, 306, 304,
+    303, 302, 300, 299, 297, 296, 295, 293,
+    292, 291, 289, 288, 287, 286, 284, 283,
+    282, 281, 280, 278, 277, 276, 275, 274,
+    273, 271, 270, 269, 268, 267, 266, 265,
+    264, 263, 262, 261, 260, 259, 258, 257
+};
+
+/* Precomputed cameraX values for 20 columns
+ * cameraX = (col * 512 / 20) - 256, in 8.8 fixed point */
+const s16 cameraX_table[20] = {
+    -256, -231, -205, -180, -154, -128, -103, -77, -52, -26,
+    0, 25, 51, 76, 102, 128, 153, 179, 204, 230
+};
 
 /* ============================================
  * Fixed-point 8.8 multiply: (a * b) >> 8
@@ -84,23 +139,57 @@ s16 fp_mul(s16 a, s16 b) {
 }
 
 /* ============================================
- * Fixed-point 8.8 divide: (a << 8) / b
+ * Fast reciprocal lookup for deltaDist calculation
+ * Returns |256 / val| in 8.8 fixed point
+ * Uses recip_table for values 1..255, handles
+ * larger values by decomposition.
  * ============================================ */
-s16 fp_div(s16 a, s16 b) {
-    u8 neg;
-    u16 ua, ub, qhi, rhi, qlo;
-    neg = 0;
-    if (a < 0) { a = -a; neg = 1; }
-    if (b < 0) { b = -b; neg ^= 1; }
-    ua = (u16)a; ub = (u16)b;
-    if (ub == 0) return 0x7FFF;
-    qhi = ua / ub;
-    rhi = ua % ub;
-    if (rhi > 255) qlo = ((rhi << 7) / ub) << 1;
-    else qlo = (rhi << 8) / ub;
-    ua = (qhi << 8) + qlo;
-    if (neg) return -(s16)ua;
-    return (s16)ua;
+s16 fast_recip(s16 val) {
+    u16 uv;
+    u16 result;
+
+    if (val < 0) val = -val;
+    uv = (u16)val;
+
+    if (uv == 0) return 0x7FFF;
+
+    /* For small values (1-255), direct table lookup */
+    if (uv < 256) {
+        return (s16)recip_table[uv];
+    }
+
+    /* For larger values (256+), the result is < 256 (< 1.0 in 8.8).
+     * recip = 65536 / uv. Since uv >= 256, result <= 256.
+     * Use integer division directly. */
+    result = (u16)(65535u / uv);
+    return (s16)result;
+}
+
+/* ============================================
+ * Fast sideDist calculation using shift approximation
+ * sideDist = (frac * deltaDist) >> 8
+ * frac is 0-255 (fractional part of player position)
+ * deltaDist is in 8.8 fixed point
+ * This avoids the full fp_mul decomposition.
+ * ============================================ */
+s16 fast_frac_mul(u16 frac, s16 deltaDist) {
+    u8 frac8;
+    u8 dhi, dlo;
+    u16 ud, result;
+
+    /* frac is 0..255 (always positive) */
+    /* deltaDist is always positive (absolute value from recip) */
+    ud = (u16)deltaDist;
+    dhi = (u8)(ud >> 8);
+    dlo = (u8)(ud & 0xFF);
+    frac8 = (u8)(frac & 0xFF);
+
+    /* (frac * deltaDist) >> 8
+     * = (frac * (dhi*256 + dlo)) >> 8
+     * = frac * dhi + (frac * dlo) >> 8 */
+    result = (u16)frac8 * (u16)dhi;
+    result += ((u16)frac8 * (u16)dlo) >> 8;
+    return (s16)result;
 }
 
 /* ============================================
@@ -224,8 +313,10 @@ void handleInput(void) {
 }
 
 /* ============================================
- * DDA Raycaster -- compute column data for 40 columns
- * Based on lodev.org raycasting tutorial
+ * DDA Raycaster -- compute column data for 20 columns
+ * Optimized: reciprocal LUT replaces fp_div,
+ * fast_frac_mul replaces fp_mul for sideDist,
+ * precomputed cameraX values.
  * ============================================ */
 void castRays(void) {
     u8 col;
@@ -243,19 +334,12 @@ void castRays(void) {
     s16 half;
     s16 drawStart, drawEnd;
     u8 wallColor;
-    u16 distInt;
     u16 idx;
-    s16 fracX, fracY;
+    u16 fracX, fracY;
 
     for (col = 0; col < NUM_COLS; col++) {
-        /* cameraX = (2 * col / NUM_COLS - 1) in 8.8
-         * = col * 512 / 40 - 256
-         * Simplified: col*13 - 256 (approximate)
-         * More precise: col * 12 + col/2 + col/5 ... let's just do it */
-        /* cameraX = ((col * 512) / NUM_COLS) - 256 */
-        /* To avoid overflow: col * 512 = col << 9 */
-        /* col ranges 0..39, col*512 = 0..19968 -- fits in u16 */
-        cameraX = (s16)(((u16)col * 512) / NUM_COLS) - 256;
+        /* Precomputed cameraX from table */
+        cameraX = cameraX_table[col];
 
         /* rayDir = dir + plane * cameraX */
         rayDirX = dirX + fp_mul(planeX, cameraX);
@@ -265,41 +349,33 @@ void castRays(void) {
         mapX = posX >> 8;
         mapY = posY >> 8;
 
-        /* deltaDist = |1 / rayDir| in 8.8
-         * = 256 / |rayDir| (since 1.0 = 256 in 8.8)
-         * We use fp_div for precision */
-        if (rayDirX == 0) {
-            deltaDistX = 0x7FFF;
-        } else {
-            deltaDistX = fp_abs(fp_div(256, rayDirX));
-        }
-        if (rayDirY == 0) {
-            deltaDistY = 0x7FFF;
-        } else {
-            deltaDistY = fp_abs(fp_div(256, rayDirY));
-        }
+        /* deltaDist = |256 / rayDir| using reciprocal table
+         * This replaces the expensive fp_div calls */
+        deltaDistX = fast_recip(rayDirX);
+        deltaDistY = fast_recip(rayDirY);
 
-        /* Step direction and initial sideDist */
+        /* Step direction and initial sideDist
+         * Using fast_frac_mul instead of fp_mul */
         if (rayDirX < 0) {
             stepX = -1;
-            /* sideDist = (pos - map) * deltaDist */
-            fracX = posX - (mapX << 8);
-            sideDistX = fp_mul(fracX, deltaDistX);
+            /* frac = posX - mapX*256 (fractional part, 0..255) */
+            fracX = (u16)(posX - (mapX << 8));
+            sideDistX = fast_frac_mul(fracX, deltaDistX);
         } else {
             stepX = 1;
-            /* sideDist = (map + 1 - pos) * deltaDist */
-            fracX = ((mapX + 1) << 8) - posX;
-            sideDistX = fp_mul(fracX, deltaDistX);
+            /* frac = (mapX+1)*256 - posX */
+            fracX = (u16)(((mapX + 1) << 8) - posX);
+            sideDistX = fast_frac_mul(fracX, deltaDistX);
         }
 
         if (rayDirY < 0) {
             stepY = -1;
-            fracY = posY - (mapY << 8);
-            sideDistY = fp_mul(fracY, deltaDistY);
+            fracY = (u16)(posY - (mapY << 8));
+            sideDistY = fast_frac_mul(fracY, deltaDistY);
         } else {
             stepY = 1;
-            fracY = ((mapY + 1) << 8) - posY;
-            sideDistY = fp_mul(fracY, deltaDistY);
+            fracY = (u16)(((mapY + 1) << 8) - posY);
+            sideDistY = fast_frac_mul(fracY, deltaDistY);
         }
 
         /* DDA loop */
@@ -340,20 +416,20 @@ void castRays(void) {
             perpDist = 0x0400;  /* 4.0 in 8.8 (far away) */
         }
 
-        /* Clamp perpDist to minimum of 1 */
+        /* Clamp perpDist to minimum */
         if (perpDist < 1) perpDist = 1;
 
         /* Compute wall height from perpDist
-         * lineHeight = SCREEN_H / (perpDist / 256)
-         * = SCREEN_H * 256 / perpDist
-         * = 20480 / perpDist
-         * For integer approximation: */
-        distInt = (u16)perpDist >> 8;
-        if (distInt > 0) {
-            lineHeight = (s16)(SCREEN_H / distInt);
-        } else {
-            /* perpDist < 1.0 -- very close, full height */
+         * lineHeight = SCREEN_H * 256 / perpDist = 20480 / perpDist
+         * Use recip_table for perpDist < 256, direct division otherwise */
+        if ((u16)perpDist < 256) {
+            /* perpDist < 1.0 in 8.8 -- very close
+             * lineHeight = 80 * recip_table[perpDist] >> 8
+             * But recip_table values can be huge, so just clamp to SCREEN_H */
             lineHeight = SCREEN_H;
+        } else {
+            /* perpDist >= 256 (>= 1.0): safe integer division */
+            lineHeight = (s16)(20480u / (u16)perpDist);
         }
 
         /* Clamp lineHeight to screen height */
@@ -390,19 +466,10 @@ int main(void) {
     initPlayer();
 
     while (1) {
-        /* Read input and update player position/angle */
         handleInput();
-
-        /* Run DDA raycaster, fill columnData[] */
         castRays();
-
-        /* Copy columnData to $70:0000 */
         writeColumnData();
-
-        /* Start GSU pixel plotter and wait for completion */
         startGSU();
-
-        /* Wait for VBlank, then DMA tile framebuffer to VRAM */
         waitVBlankSimple();
         dmaFramebuffer();
         restoreDisplayRegs();
