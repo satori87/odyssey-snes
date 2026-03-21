@@ -1,7 +1,9 @@
 [objects]
-crt0.obj
-tcclib.obj
 src/raycaster.obj
 hdr.obj
 data.obj
 gsu_raycaster.obj
+C:/pvsneslib/pvsneslib/pvsneslib/lib/LoROM_SlowROM/crt0_snes.obj
+C:/pvsneslib/pvsneslib/pvsneslib/lib/LoROM_SlowROM/libc.obj
+C:/pvsneslib/pvsneslib/pvsneslib/lib/LoROM_SlowROM/libm.obj
+C:/pvsneslib/pvsneslib/pvsneslib/lib/LoROM_SlowROM/libtcc.obj

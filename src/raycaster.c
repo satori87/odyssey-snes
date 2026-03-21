@@ -26,8 +26,8 @@ typedef signed long long s32;
 #include "../data/map.h"
 
 #define SCREEN_W  160
-#define SCREEN_H  80
-#define HALF_H    40
+#define SCREEN_H  96
+#define HALF_H    48
 #define NUM_COLS  20
 #define COL_W     8
 
@@ -44,7 +44,7 @@ typedef signed long long s32;
 #define PAD_A      0x0080
 
 /* External assembly functions (in data.asm) */
-extern void initMode7Display(void);
+extern void initMode3Display(void);
 extern void initGSU(void);
 extern void startGSU(void);
 extern void disableNMI(void);
@@ -207,7 +207,7 @@ void handleInput(void) {
  *   5. Loop
  * ============================================ */
 int main(void) {
-    initMode7Display();
+    initMode3Display();
     initGSU();
     disableNMI();
     initPlayer();

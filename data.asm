@@ -1,11 +1,12 @@
-;; data.asm -- Mode 7 display + SuperFX control + Doom-exact IRQ-driven DMA
+;; data.asm -- Mode 3 display + SuperFX control + DMA
 ;;
-;; Architecture (matching Doom SNES source):
-;;   - JML stub at $7E:1F00 in WRAM (4 bytes: JML opcode + 3-byte target)
-;;   - IRQ vector in ROM -> IRQTrampoline -> JML $7E1F00 -> handler
-;;   - Bottom IRQ (scanline 176): forced blank + DMA 12800 bytes
-;;   - NMITIMEN = $21: V-count IRQ + auto-joypad, NO NMI
-;;   - DMA runs during VBlank
+;; Architecture:
+;;   - Mode 3 (BG1 256-color 8bpp) matching Doom SNES display approach
+;;   - Viewport: 160x96 pixels = 20x12 chars = 240 tiles
+;;   - BG1 chars at VRAM $0000
+;;   - BG1 map at VRAM $4000
+;;   - SuperFX plot writes bitplane-format tiles to $70:0400
+;;   - DMA transfers from $70:0400 to VRAM $0000 (tile char data)
 ;;
 ;; Memory map for WRAM scratch area:
 ;;   $7E:1F00-1F03  JML stub (4 bytes: $5C + 3-byte address)
@@ -23,14 +24,13 @@
 .ROMBANKSIZE $8000
 .ROMBANKS 8
 
-.section ".mode7_sfx_code" superfree
+.section ".mode3_sfx_code" superfree
 
 ;; -------------------------------------------------------
 ;; Constants
 ;; -------------------------------------------------------
-.define VIEWPORT_TOP     48    ; first visible scanline of viewport
-.define VIEWPORT_BOTTOM  176   ; last visible scanline of viewport
-.define IRQ_BOTTOM       176   ; bottom IRQ fires here -> forced blank
+.define VIEWPORT_BOTTOM  176   ; bottom IRQ fires here -> forced blank
+.define IRQ_BOTTOM       176
 
 ;; WRAM addresses for IRQ stub and sync flag
 .define JML_STUB         $7E1F00   ; 4 bytes: JML opcode + 24-bit target
@@ -42,6 +42,12 @@
 ;; Display brightness value (full brightness, no forced blank)
 .define INIDISP_ON       $0F
 
+;; Tile data constants
+.define NUM_TILES        240       ; 20x12 tiles
+.define TILE_BYTES       64        ; 8bpp tile = 64 bytes
+.define TILE_DATA_SIZE   15360     ; 240 * 64 = 15360 bytes
+.define TILE_DATA_WORDS  7680      ; 15360 / 2
+
 ;; -------------------------------------------------------
 ;; IRQTrampoline -- ROM entry point for IRQ vector
 ;; The native IRQ vector in hdr.asm points here.
@@ -52,8 +58,8 @@ IRQTrampoline:
     jml JML_STUB         ; -> $7E:1F00 which contains JML to actual handler
 
 ;; -------------------------------------------------------
-;; _IRQBottom -- Bottom-of-viewport IRQ handler (scanline 176)
-;; Like Doom: forced blank -> DMA framebuffer -> set next IRQ to top
+;; _IRQBottom -- Bottom-of-viewport IRQ handler
+;; Forced blank -> DMA framebuffer -> restore display
 ;; -------------------------------------------------------
 _IRQBottom:
     rep #$30
@@ -69,7 +75,7 @@ _IRQBottom:
     ; Acknowledge IRQ
     lda.l $4211
 
-    ; Forced blank (we're at scanline 176, viewport already displayed)
+    ; Forced blank
     lda #$80
     sta.l $2100
 
@@ -79,20 +85,20 @@ _IRQBottom:
 
     ; === Configure VRAM address and increment ===
     lda #$80
-    sta.l $2115          ; VMAIN: increment after high byte write ($2119)
+    sta.l $2115          ; VMAIN: increment after high byte write
 
-    ; VRAM destination: word address $0040 (tile 1 starts at byte $80 = word $40)
-    ; Tiles 1-200 in VRAM, each 64 bytes, starting at word $0040
+    ; VRAM destination: word address $0000 (tile data starts here)
     rep #$20
-    lda #$0040
+    lda #$0000
     sta.l $2116          ; VMADDL/VMADDH
     sep #$20
 
-    ; === DMA channel 0: transfer 12800 bytes from $70:0400 to VRAM ===
-    lda #$00
-    sta.l $4300          ; DMA control: A->B, 1 register, no increment mode byte
-    lda #$19
-    sta.l $4301          ; destination: $2119 (VRAM data high byte)
+    ; === DMA channel 0: transfer tile data from $70:0400 to VRAM ===
+    ; Mode 3 8bpp: use word-mode DMA (2-register write to $2118/$2119)
+    lda #$01
+    sta.l $4300          ; DMAP: A->B, 2-register (write to $2118 then $2119)
+    lda #$18
+    sta.l $4301          ; BBAD: destination = $2118 (VMDATAL)
 
     ; Source address: $70:0400 (SuperFX framebuffer)
     rep #$20
@@ -102,9 +108,9 @@ _IRQBottom:
     lda #$70
     sta.l $4304          ; A1B0: source bank
 
-    ; Transfer size: 12800 bytes (200 tiles * 64 bytes)
+    ; Transfer size: 15360 bytes (240 tiles * 64 bytes)
     rep #$20
-    lda #12800
+    lda #TILE_DATA_SIZE
     sta.l $4305          ; DAS0L/DAS0H
     sep #$20
 
@@ -121,22 +127,20 @@ _IRQBottom:
     sta.l DMA_DONE
 
     ; === Wait for VBlank to end, then wait for NEXT VBlank ===
-    ; DMA finished during VBlank. Wait for active display to start...
 @WNV:
     lda.l $4212
     and #$80
     bne @WNV
-    ; ...then wait for next VBlank (ensures full frame before display on)
 @WVB:
     lda.l $4212
     and #$80
     beq @WVB
 
     ; === Re-enable display at VBlank start ===
-    lda #$07
-    sta.l $2105          ; Mode 7
+    lda #$03
+    sta.l $2105          ; Mode 3
     lda #$01
-    sta.l $212C          ; BG1
+    sta.l $212C          ; TM = BG1
     lda #INIDISP_ON
     sta.l $2100          ; display ON
 
@@ -233,9 +237,13 @@ waitDMADone:
     rtl
 
 ;; -------------------------------------------------------
-;; initMode7Display -- Mode 7 display setup
+;; initMode3Display -- Mode 3 (BG1 256-color 8bpp) setup
+;;
+;; Viewport: 160x96 pixels = 20x12 chars = 240 tiles
+;; BG1 chars at VRAM $0000
+;; BG1 map at VRAM $4000 (word addr $4000, 32x32)
 ;; -------------------------------------------------------
-initMode7Display:
+initMode3Display:
     php
     phb
     sep #$20
@@ -245,130 +253,144 @@ initMode7Display:
     lda #$80
     sta.l $2100
 
-    ; Mode 7
-    lda #$07
-    sta.l $2105
+    ; Mode 3 (BG1=8bpp, BG2=4bpp)
+    lda #$03
+    sta.l $2105          ; BGMODE = $03
+
+    ; BG1 tilemap at VRAM $4000, 32x32
+    ; BG1SC = (base >> 8) | size
+    ; VRAM word addr $4000 -> base = $40, size = 0 (32x32)
+    lda #$40
+    sta.l $2107          ; BG1SC
+
+    ; BG1 character base at VRAM $0000
+    ; BG12NBA: bits 0-3 = BG1 base (in 8K word units), bits 4-7 = BG2 base
+    ; $0000 / $2000 = 0
+    lda #$00
+    sta.l $210B          ; BG12NBA
+
+    ; TM = BG1 only
     lda #$01
-    sta.l $212C
+    sta.l $212C          ; TM
 
-    ; Mode 7 matrix: ~1.6x scale (A=D=$00A0)
-    lda #$A0
-    sta.l $211B
-    lda #$00
-    sta.l $211B
-    lda #$00
-    sta.l $211C
-    sta.l $211C
-    sta.l $211D
-    sta.l $211D
-    lda #$A0
-    sta.l $211E
-    lda #$00
-    sta.l $211E
+    ; VMAIN: increment after high byte write
+    lda #$80
+    sta.l $2115
 
-    ; Scroll: VOFS/HOFS = 0 and Mode 7 center = 0
+    ; === Load palette (256-color mode) ===
+    ; Colors 0-15: texture palette
     lda #$00
-    sta.l $210D
-    sta.l $210D
-    sta.l $210E
-    sta.l $210E
-    sta.l $211F
-    sta.l $211F
-    sta.l $2120
-    sta.l $2120
-
-    ; Load palette
-    lda #$00
-    sta.l $2121
+    sta.l $2121          ; CGADD = 0
     ldx #$0000
 @PalLoop:
     lda.l shared_palette,x
     sta.l $2122
     inx
-    cpx #$0020
+    cpx #$0020           ; 16 colors * 2 bytes = 32 bytes
     bne @PalLoop
+
+    ; Colors 16-17: ceiling and floor
     lda #16
-    sta.l $2121
+    sta.l $2121          ; CGADD = 16
     ldx #$0000
 @ExPalLoop:
     lda.l extra_palette,x
     sta.l $2122
     inx
-    cpx #$0004
+    cpx #$0004           ; 2 colors * 2 bytes = 4 bytes
     bne @ExPalLoop
 
-    ; Tilemap: 20x10, tile = row*20+col+1
-    lda #$00
-    sta.l $2115
+    ; === Build BG1 tilemap at VRAM $4000 ===
+    ; Mode 3 tilemap entries are 16-bit:
+    ;   bits 0-9: tile number (0-1023)
+    ;   bits 10-12: palette number
+    ;   bit 13: priority
+    ;   bit 14: H-flip
+    ;   bit 15: V-flip
+    ; We use: tile N at row/col, all other bits = 0
+    ;
+    ; Layout: 20 columns x 12 rows of viewport tiles (indices 0-239)
+    ; Remaining tiles in the 32x32 map are 0 (transparent/black)
+
+    ; Set VRAM address to tilemap base
+    ; VMAIN already set to $80 (increment after high write)
     rep #$20
-    lda #$0000
-    sta.l $2116
+    lda #$4000
+    sta.l $2116          ; VMADDL/VMADDH = $4000
     sep #$20
-    ldy #$0000
+
+    ; Tile index counter
+    ldx #$0000           ; tile index (0-239)
+    ldy #$0000           ; row counter (0-31)
 @TM_RowLoop:
-    cpy #$000A
+    cpy #$000C           ; 12 tile rows for viewport
     bcs @TM_BlankRow
-    ldx #$0000
+
+    ; Columns 0-19: viewport tiles
+    phx                  ; save tile index on stack
+    ldx #$0000           ; column counter
 @TM_ColLoop:
-    cpx #$0014
+    cpx #$0014           ; 20 columns
     bcs @TM_PadCol
+
+    ; Write tile index (16-bit: lo then hi via $2118/$2119)
+    ; Pull current tile index from stack, write, push incremented
+    ply                  ; Y = current tile index
+    rep #$20
     tya
-    asl a
-    asl a
-    sta $50
-    tya
-    asl a
-    asl a
-    asl a
-    asl a
-    clc
-    adc $50
-    sta $50
-    txa
-    clc
-    adc $50
-    inc a
-    sta.l $2118
-    lda #$00
-    sta.l $2119
+    sta.l $2118          ; VMDATAL/VMDATAH (writes both bytes, auto-increments VRAM addr)
+    sep #$20
+    iny                  ; next tile index
+    phy                  ; save it back
     inx
     bra @TM_ColLoop
-@TM_PadCol:
-    lda #$00
-    sta.l $2118
-    sta.l $2119
-    inx
-    cpx #$0080
-    bne @TM_PadCol
-    iny
-    bra @TM_RowLoop
-@TM_BlankRow:
-    ldx #$0000
-@TM_BlankCol:
-    lda #$00
-    sta.l $2118
-    sta.l $2119
-    inx
-    cpx #$0080
-    bne @TM_BlankCol
-    iny
-    cpy #$0080
-    bne @TM_RowLoop
 
-    ; Clear tile pixel data
-    lda #$80
-    sta.l $2115
+@TM_PadCol:
+    ; Columns 20-31: blank tiles (tile 0 = black)
     rep #$20
     lda #$0000
-    sta.l $2116
+    sta.l $2118
+    sep #$20
+    inx
+    cpx #$0020           ; 32 columns total
+    bne @TM_PadCol
+
+    plx                  ; restore tile index (was on stack from phy)
+    iny                  ; next row
+    bra @TM_RowLoop
+
+@TM_BlankRow:
+    ; Rows 12-31: all blank tiles
+    ldx #$0000
+@TM_BlankCol:
+    rep #$20
+    lda #$0000
+    sta.l $2118
+    sep #$20
+    inx
+    cpx #$0020           ; 32 columns
+    bne @TM_BlankCol
+    iny
+    cpy #$0020           ; 32 rows total
+    bne @TM_RowLoop
+
+    ; === Clear tile character data at VRAM $0000 ===
+    ; 240 tiles * 32 words each = 7680 words
+    lda #$80
+    sta.l $2115          ; VMAIN: word increment
+    rep #$20
+    lda #$0000
+    sta.l $2116          ; VRAM addr = $0000
     sep #$20
     rep #$10
     ldy #$0000
 @ClearTiles:
     lda #$00
-    sta.l $2119
+    sta.l $2118          ; VMDATAL
+    sta.l $2119          ; VMDATAH (triggers increment)
     iny
-    cpy #12864
+    iny                  ; count by 2 (we wrote 2 bytes = 1 word)
+    cpy #TILE_DATA_SIZE
     bne @ClearTiles
 
     ; Screen on (will be controlled by IRQ after setupIRQ)
@@ -390,9 +412,9 @@ initGSU:
     lda #$A0
     sta.l $3037          ; CFGR
     lda #$1F
-    sta.l $303A          ; SCMR
+    sta.l $303A          ; SCMR: 160px wide, 256-color, GSU has ROM+RAM
     lda #$01
-    sta.l $3038          ; SCBR
+    sta.l $3038          ; SCBR: screen base = $70:0400 (bank 1 * $400)
     lda #$00
     sta.l $3034          ; PBR
     plp
@@ -525,7 +547,7 @@ readJoypad:
     rtl
 
 ;; -------------------------------------------------------
-;; Legacy stubs (kept for linkage, should not be called)
+;; Legacy stubs (kept for linkage compatibility)
 ;; -------------------------------------------------------
 dmaFramebuffer:
     php
@@ -537,19 +559,19 @@ dmaFramebuffer:
     ; Give SNES RAM access
     lda #$17
     sta.l $303A
-    ; VMAIN
+    ; VMAIN: word increment
     lda #$80
     sta.l $2115
-    ; VRAM addr
+    ; VRAM addr = $0000
     rep #$20
-    lda #$0040
+    lda #$0000
     sta.l $2116
     sep #$20
-    ; DMA setup
-    lda #$00
-    sta.l $4300
-    lda #$19
-    sta.l $4301
+    ; DMA setup: word-mode to $2118/$2119
+    lda #$01
+    sta.l $4300          ; DMAP: 2-register word write
+    lda #$18
+    sta.l $4301          ; BBAD: $2118 (VMDATAL)
     rep #$20
     lda #$0400
     sta.l $4302
@@ -557,7 +579,7 @@ dmaFramebuffer:
     lda #$70
     sta.l $4304
     rep #$20
-    lda #12800
+    lda #TILE_DATA_SIZE  ; 15360 bytes
     sta.l $4305
     sep #$20
     lda #$01
@@ -565,11 +587,11 @@ dmaFramebuffer:
     ; Give GSU back RAM
     lda #$1F
     sta.l $303A
-    ; Screen on
-    lda #$07
-    sta.l $2105
+    ; Screen on with Mode 3
+    lda #$03
+    sta.l $2105          ; Mode 3
     lda #$01
-    sta.l $212C
+    sta.l $212C          ; BG1
     lda #$0F
     sta.l $2100
     plp
