@@ -539,7 +539,7 @@ writeColumnData:
 
 ;; -------------------------------------------------------
 ;; disableNMI -- Disable NMI, keep auto-joypad
-;; (Called before setupIRQ to turn off PVSnesLib's NMI handler)
+;; (Called before setupIRQ to ensure clean IRQ-only mode)
 ;; -------------------------------------------------------
 disableNMI:
     php

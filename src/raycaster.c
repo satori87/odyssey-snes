@@ -21,7 +21,14 @@
  *   - Simplified sideDist using shift instead of full fp_mul
  * ============================================ */
 
-#include <snes.h>
+/* Type definitions (replaces PVSnesLib's snes.h) */
+typedef unsigned char u8;
+typedef signed char s8;
+typedef unsigned short u16;
+typedef signed short s16;
+typedef unsigned long long u32;
+typedef signed long long s32;
+
 #include "../data/palettes.h"
 #include "../data/tables.h"
 #include "../data/map.h"
