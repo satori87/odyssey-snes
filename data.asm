@@ -4,9 +4,8 @@
 ;;   - JML stub at $7E:1F00 in WRAM (4 bytes: JML opcode + 3-byte target)
 ;;   - IRQ vector in ROM -> IRQTrampoline -> JML $7E1F00 -> handler
 ;;   - Bottom IRQ (scanline 176): forced blank + DMA 12800 bytes
-;;   - Top IRQ (scanline 47): re-enable display
-;;   - NMITIMEN = $31: V-count IRQ + H-count IRQ + auto-joypad, NO NMI
-;;   - DMA runs during ~85 scanlines of forced blank (>14500 bytes capacity)
+;;   - NMITIMEN = $21: V-count IRQ + auto-joypad, NO NMI
+;;   - DMA runs during VBlank
 ;;
 ;; Memory map for WRAM scratch area:
 ;;   $7E:1F00-1F03  JML stub (4 bytes: $5C + 3-byte address)
@@ -32,14 +31,12 @@
 .define VIEWPORT_TOP     48    ; first visible scanline of viewport
 .define VIEWPORT_BOTTOM  176   ; last visible scanline of viewport
 .define IRQ_BOTTOM       176   ; bottom IRQ fires here -> forced blank
-.define IRQ_TOP          47    ; top IRQ fires here -> display on
 
 ;; WRAM addresses for IRQ stub and sync flag
 .define JML_STUB         $7E1F00   ; 4 bytes: JML opcode + 24-bit target
 .define DMA_DONE         $7E1F10   ; 1 byte: frame sync flag
 
-;; NMITIMEN value: V-count IRQ + H-count IRQ + auto-joypad, NO NMI
-;; Bit 5: V-count enable, Bit 4: H-count enable, Bit 0: auto-joypad
+;; NMITIMEN value: V-count IRQ + auto-joypad, NO NMI
 .define NMITIMEN_VAL     $21       ; V-count IRQ + auto-joypad (no H-count, no NMI)
 
 ;; Display brightness value (full brightness, no forced blank)
@@ -166,77 +163,6 @@ _IRQBottom:
     rti
 
 ;; -------------------------------------------------------
-;; _IRQTop -- Top-of-viewport IRQ handler (scanline 47)
-;; -------------------------------------------------------
-_IRQTop:
-    rep #$30
-    pha
-    phx
-    phy
-    phb
-    phd
-
-    sep #$20
-    rep #$10
-
-    ; === Doom-exact HBlank sync ===
-    lda #248
-    sta.l $4207          ; HTIMEL = 248 (HBlank)
-    lda #$00
-    sta.l $4208          ; HTIMEH = 0
-
-    lda.l $4211          ; Read TIMEUP to clear IRQ flag
-
-    lda #INIDISP_ON      ; full brightness
-    wai                  ; waits for H=248 match (HBlank)
-    sta.l $2100          ; INIDISP = display ON at clean HBlank
-
-    ; === Restore Mode 7 display registers ===
-    ; (In case DMA or other operations disturbed them)
-    lda #$07
-    sta.l $2105          ; BGMODE = Mode 7
-    lda #$01
-    sta.l $212C          ; TM = BG1 enabled
-
-    ; === Configure next IRQ: bottom of viewport (scanline 176) ===
-    lda #IRQ_BOTTOM
-    sta.l $4209          ; VTIMEL
-    lda #$00
-    sta.l $420A          ; VTIMEH
-
-    ; === Patch JML stub to point to bottom IRQ handler ===
-    rep #$20
-    lda #_IRQBottom & $FFFF
-    sta.l JML_STUB + 1
-    sep #$20
-    lda #:_IRQBottom
-    sta.l JML_STUB + 3
-
-    ; === Restore HTIMEL to 96 for next IRQ trigger ===
-    lda #96
-    sta.l $4207
-    lda #$00
-    sta.l $4208
-
-    ; === Re-enable IRQs ===
-    lda #NMITIMEN_VAL
-    sta.l $4200
-
-    ; === Clear pending IRQ ===
-    lda.l $4211
-
-    pld
-    plb
-    ply
-    plx
-
-    rep #$20
-    pla
-    sep #$20
-
-    rti
-
-;; -------------------------------------------------------
 ;; setupIRQ -- Initialize the Doom-style IRQ system
 ;; Called once at startup after display init.
 ;; -------------------------------------------------------
@@ -250,16 +176,13 @@ setupIRQ:
     lda #$5C
     sta.l JML_STUB
 
-    ; Bytes 1-3: target = _IRQBottom (always, single-phase)
+    ; Bytes 1-3: target = _IRQBottom
     rep #$20
     lda #_IRQBottom & $FFFF
     sta.l JML_STUB + 1
     sep #$20
     lda #:_IRQBottom
     sta.l JML_STUB + 3
-
-    ; Use V-count only IRQ (not combined V+H) for reliability
-    ; $21 = V-count IRQ + auto-joypad, NO H-count, NO NMI
 
     ; === Clear DMA_DONE flag ===
     lda #$00
@@ -271,17 +194,13 @@ setupIRQ:
     lda #$00
     sta.l $420A          ; VTIMEH
 
-    ; === Set H-count IRQ position (like Doom's RLHIntL=96) ===
-    ; IRQ fires at H=96 (left side of scanline, during active display)
-    ; Handler changes H to 248 (HBlank) and uses wai to sync
+    ; === Set H-count IRQ position ===
     lda #96
     sta.l $4207          ; HTIMEL = 96
     lda #$00
     sta.l $4208          ; HTIMEH = 0
 
-    ; === Enable V-count + H-count IRQ + auto-joypad in NMITIMEN ===
-    ; $31 = 00110001: V-IRQ enable + H-IRQ enable + auto-joypad
-    ; NMI disabled (bit 7 = 0)
+    ; === Enable V-count IRQ + auto-joypad in NMITIMEN ===
     lda #NMITIMEN_VAL
     sta.l $4200          ; NMITIMEN
 
@@ -481,6 +400,7 @@ initGSU:
 
 ;; -------------------------------------------------------
 ;; startGSU -- Start GSU from WRAM stub
+;; Sets SFR to start GSU execution at gsu_fill_screen
 ;; -------------------------------------------------------
 startGSU:
     php
@@ -521,25 +441,64 @@ startGSU:
 @GSUStubEnd:
 
 ;; -------------------------------------------------------
-;; writeColumnData -- Copy 60 bytes from C global to $70:0000
+;; writePlayerState -- Copy 12 bytes of player state to $70:0000
+;;
+;; Player state layout in $70:0000 (all 8.8 fixed point):
+;;   $0000: posX    (2 bytes)
+;;   $0002: posY    (2 bytes)
+;;   $0004: dirX    (2 bytes)
+;;   $0006: dirY    (2 bytes)
+;;   $0008: planeX  (2 bytes)
+;;   $000A: planeY  (2 bytes)
+;;
+;; Reads from C globals: posX, posY, dirX, dirY, planeX, planeY
 ;; -------------------------------------------------------
-writeColumnData:
+writePlayerState:
     php
     sep #$20
     rep #$10
-    ldx #$0000
-@WCD:
-    lda.l columnData,x
-    sta.l $700000,x
-    inx
-    cpx #$003C
-    bne @WCD
+
+    ; === Give SNES access to SuperFX RAM ===
+    lda #$17
+    sta.l $303A          ; SCMR: SNES has RAM
+
+    rep #$20
+
+    ; posX -> $70:0000
+    lda.l posX
+    sta.l $700000
+
+    ; posY -> $70:0002
+    lda.l posY
+    sta.l $700002
+
+    ; dirX -> $70:0004
+    lda.l dirX
+    sta.l $700004
+
+    ; dirY -> $70:0006
+    lda.l dirY
+    sta.l $700006
+
+    ; planeX -> $70:0008
+    lda.l planeX
+    sta.l $700008
+
+    ; planeY -> $70:000A
+    lda.l planeY
+    sta.l $70000A
+
+    sep #$20
+
+    ; === Give GSU back RAM access ===
+    lda #$1F
+    sta.l $303A          ; SCMR: GSU has ROM+RAM
+
     plp
     rtl
 
 ;; -------------------------------------------------------
 ;; disableNMI -- Disable NMI, keep auto-joypad
-;; (Called before setupIRQ to ensure clean IRQ-only mode)
 ;; -------------------------------------------------------
 disableNMI:
     php
@@ -569,9 +528,65 @@ readJoypad:
 ;; Legacy stubs (kept for linkage, should not be called)
 ;; -------------------------------------------------------
 dmaFramebuffer:
+    php
+    sep #$20
+    rep #$10
+    ; Force blank
+    lda #$80
+    sta.l $2100
+    ; Give SNES RAM access
+    lda #$17
+    sta.l $303A
+    ; VMAIN
+    lda #$80
+    sta.l $2115
+    ; VRAM addr
+    rep #$20
+    lda #$0040
+    sta.l $2116
+    sep #$20
+    ; DMA setup
+    lda #$00
+    sta.l $4300
+    lda #$19
+    sta.l $4301
+    rep #$20
+    lda #$0400
+    sta.l $4302
+    sep #$20
+    lda #$70
+    sta.l $4304
+    rep #$20
+    lda #12800
+    sta.l $4305
+    sep #$20
+    lda #$01
+    sta.l $420B
+    ; Give GSU back RAM
+    lda #$1F
+    sta.l $303A
+    ; Screen on
+    lda #$07
+    sta.l $2105
+    lda #$01
+    sta.l $212C
+    lda #$0F
+    sta.l $2100
+    plp
     rtl
 
 waitVBlankSimple:
+    php
+    sep #$20
+@WNV:
+    lda.l $4212
+    and #$80
+    bne @WNV
+@WV:
+    lda.l $4212
+    and #$80
+    beq @WV
+    plp
     rtl
 
 restoreDisplayRegs:
