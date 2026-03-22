@@ -43,10 +43,13 @@
 .define INIDISP_ON       $0F
 
 ;; Tile data constants
-.define NUM_TILES        384       ; 32x12 tiles (includes 12 padding cols)
+.define VIEW_COLS        32        ; viewport tile columns (256 pixels, full width)
+.define VIEW_ROWS        15        ; viewport tile rows (120 pixels, max for 32KB)
+.define NUM_TILES        480       ; 32x15 tiles
+.define PAD_TILE         480       ; black padding tile index (all zeros)
 .define TILE_BYTES       64        ; 8bpp tile = 64 bytes
-.define TILE_DATA_SIZE   24576     ; 384 * 64 = 24576 bytes
-.define TILE_DATA_WORDS  12288     ; 24576 / 2
+.define TILE_DATA_SIZE   30784     ; (480+1) * 64 = 30784 bytes (includes padding tile)
+.define TILE_DATA_WORDS  15392     ; 30784 / 2
 
 ;; -------------------------------------------------------
 ;; IRQTrampoline -- ROM entry point for IRQ vector
@@ -257,10 +260,10 @@ initMode3Display:
     lda #$03
     sta.l $2105          ; BGMODE = $03
 
-    ; BG1 tilemap at VRAM $4000, 32x32
-    ; BG1SC = (base >> 8) | size
-    ; VRAM word addr $4000 -> base = $40, size = 0 (32x32)
-    lda #$40
+    ; BG1 tilemap at VRAM $7000, 32x32
+    ; (moved from $4000 to avoid overlap with 896 tiles of char data)
+    ; BG1SC = (base >> 8) | size = ($7000 >> 8) | 0 = $70
+    lda #$70
     sta.l $2107          ; BG1SC
 
     ; BG1 character base at VRAM $0000
@@ -319,22 +322,21 @@ initMode3Display:
     sta.l $2116          ; VMADDL/VMADDH = $4000
     sep #$20
 
-    ; === Write tilemap: 240 sequential entries then 784 zeros ===
-    ; Simple sequential layout (entry N = tile N for first 240)
-    ; This ignores 32-wide tilemap rows for now — just proves entries work
+    ; === Write 32x32 tilemap: sequential 0-895, then pad 896-1023 ===
     rep #$20
-    lda #$4000
+    lda #$7000
     sta.l $2116          ; VRAM address = tilemap base
+    ; 896 sequential tiles (32×28 = full screen)
     ldx #$0000
-@TM_Seq:
+@TM_View:
     txa
-    sta.l $2118          ; write tile index = X
+    sta.l $2118
     inx
-    cpx #$00F0           ; 240 entries
-    bne @TM_Seq
-    ; Fill remaining 784 entries with tile 0
+    cpx #$0380           ; 896
+    bne @TM_View
+    ; 128 padding entries (tile 0, for the extra 4 tilemap rows)
     lda #$0000
-    ldx #$0310           ; 784
+    ldx #$0080           ; 128
 @TM_Pad:
     sta.l $2118
     dex
@@ -342,23 +344,126 @@ initMode3Display:
     sep #$20
 
     ; === Clear tile character data at VRAM $0000 ===
-    ; 240 tiles * 32 words each = 7680 words
+    ; === Write 3-band tile data to VRAM (full screen: 32x28 = 896 tiles) ===
+    ; Band 1 (rows 0-8, 288 tiles): color 16 = BP4 set
+    ; Band 2 (rows 9-18, 320 tiles): color 1 = BP0 set
+    ; Band 3 (rows 19-27, 288 tiles): color 17 = BP0+BP4 set
+    ; Each tile = 64 bytes. For uniform color:
+    ;   BP group with bit set: 8 rows of ($FF, $00) = 16 bytes
+    ;   BP group without: 8 rows of ($00, $00) = 16 bytes
     lda #$80
     sta.l $2115          ; VMAIN: word increment
     rep #$20
     lda #$0000
     sta.l $2116          ; VRAM addr = $0000
     sep #$20
+
+    ; --- Band 1: 288 tiles, color 16 (00010000) ---
+    ; BP0/1=$00/$00, BP2/3=$00/$00, BP4/5=$FF/$00, BP6/7=$00/$00
     rep #$10
-    ldy #$0000
-@ClearTiles:
+    ldx #$0000           ; tile counter
+@B1_Tile:
+    ; BP0/1 group (16 bytes of $00)
+    ldy #$0008
+@B1_01:
     lda #$00
-    sta.l $2118          ; VMDATAL
-    sta.l $2119          ; VMDATAH (triggers increment)
-    iny
-    iny                  ; count by 2 (we wrote 2 bytes = 1 word)
-    cpy #TILE_DATA_SIZE
-    bne @ClearTiles
+    sta.l $2118
+    sta.l $2119
+    dey
+    bne @B1_01
+    ; BP2/3 group (16 bytes of $00)
+    ldy #$0008
+@B1_23:
+    lda #$00
+    sta.l $2118
+    sta.l $2119
+    dey
+    bne @B1_23
+    ; BP4/5 group ($FF, $00 × 8)
+    ldy #$0008
+@B1_45:
+    lda #$FF
+    sta.l $2118
+    lda #$00
+    sta.l $2119
+    dey
+    bne @B1_45
+    ; BP6/7 group (16 bytes of $00)
+    ldy #$0008
+@B1_67:
+    lda #$00
+    sta.l $2118
+    sta.l $2119
+    dey
+    bne @B1_67
+    inx
+    cpx #$0120           ; 288 tiles
+    bne @B1_Tile
+
+    ; --- Band 2: 320 tiles, color 1 (00000001) ---
+    ; BP0/1=$FF/$00, rest $00
+@B2_Tile:
+    ; BP0/1 group ($FF, $00 × 8)
+    ldy #$0008
+@B2_01:
+    lda #$FF
+    sta.l $2118
+    lda #$00
+    sta.l $2119
+    dey
+    bne @B2_01
+    ; BP2-7 (48 bytes of $00)
+    ldy #$0018           ; 24 words = 48 bytes
+@B2_rest:
+    lda #$00
+    sta.l $2118
+    sta.l $2119
+    dey
+    bne @B2_rest
+    inx
+    cpx #$0120 + $0140   ; 288 + 320 = 608
+    bne @B2_Tile
+
+    ; --- Band 3: 288 tiles, color 17 (00010001) ---
+    ; BP0/1=$FF/$00, BP2/3=$00, BP4/5=$FF/$00, BP6/7=$00
+@B3_Tile:
+    ; BP0/1 ($FF, $00 × 8)
+    ldy #$0008
+@B3_01:
+    lda #$FF
+    sta.l $2118
+    lda #$00
+    sta.l $2119
+    dey
+    bne @B3_01
+    ; BP2/3 ($00 × 16)
+    ldy #$0008
+@B3_23:
+    lda #$00
+    sta.l $2118
+    sta.l $2119
+    dey
+    bne @B3_23
+    ; BP4/5 ($FF, $00 × 8)
+    ldy #$0008
+@B3_45:
+    lda #$FF
+    sta.l $2118
+    lda #$00
+    sta.l $2119
+    dey
+    bne @B3_45
+    ; BP6/7 ($00 × 16)
+    ldy #$0008
+@B3_67:
+    lda #$00
+    sta.l $2118
+    sta.l $2119
+    dey
+    bne @B3_67
+    inx
+    cpx #$0380           ; 896 total tiles
+    bne @B3_Tile
 
     ; Screen on (will be controlled by IRQ after setupIRQ)
     lda #INIDISP_ON

@@ -213,12 +213,8 @@ int main(void) {
     initPlayer();
 
     while (1) {
-        handleInput();
-        writePlayerState();
-        startGSU();
-        /* Manual DMA (bypass IRQ for now to verify GSU output) */
-        waitVBlankSimple();
-        dmaFramebuffer();
+        /* Static display test — tile data written to VRAM during init */
+        /* No GSU or DMA needed */
     }
 
     return 0;
