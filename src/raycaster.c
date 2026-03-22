@@ -89,10 +89,7 @@ void handleInput(void) {
 
     pad = readJoypad();
 
-    /* Auto-rotate 1 unit per frame for testing BSP response */
-    playerAngle += 1;
-
-    /* Left/Right: rotate (adds to auto-rotation) */
+    /* Left/Right: rotate */
     if (pad & PAD_LEFT) {
         playerAngle -= ROT_SPEED;
     }

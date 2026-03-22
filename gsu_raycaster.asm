@@ -166,7 +166,7 @@ _init_vert_loop:
 
     ; Initialize subsector visit counter
     ibt r0, #0
-    sm ($0180), r0
+    sm ($0024), r0
 
     ; =================================================================
     ; PHASE 1: BSP TRAVERSAL (follows rlbsp.a)
@@ -227,8 +227,8 @@ _bsp_is_node:
     inc r14
 
     ; Save r14 (now points to LeftBBox) and DeltaY
-    sm ($0152), r14             ; save ROM ptr at LeftBBox
-    sm ($0154), r4              ; save DeltaY
+    sm ($0006), r14             ; save ROM ptr at LeftBBox
+    sm ($0008), r4              ; save DeltaY
 
     ; === Cross product: DeltaX*(ViewY-LineY) - DeltaY*(ViewX-LineX) ===
     ; Part 1: DeltaX * (ViewY - LineY)
@@ -241,7 +241,7 @@ _bsp_is_node:
     move r7, r4                 ; r7 = low word
 
     ; Part 2: DeltaY * (ViewX - LineX)
-    lm r6, ($0154)              ; r6 = DeltaY
+    lm r6, ($0008)              ; r6 = DeltaY
     lm r0, (RAM_VIEWX)
     with r0
     sub r3                      ; r0 = ViewX - LineX
@@ -262,7 +262,7 @@ _bsp_is_node:
 
     ; === LEFT SIDE: visit left child first (near), then right (far) ===
 _bsp_left_side:
-    lm r14, ($0152)             ; restore ROM ptr at LeftBBox
+    lm r14, ($0006)             ; restore ROM ptr at LeftBBox
     ; Skip LeftBBox (8 bytes) to reach LeftChild
     with r14
     add #8                      ; r14 at LeftChild
@@ -308,7 +308,7 @@ _after_left_near:
 
     ; === RIGHT SIDE: visit right child first (near), then left (far) ===
 _bsp_right_side:
-    lm r14, ($0152)             ; restore ROM ptr at LeftBBox
+    lm r14, ($0006)             ; restore ROM ptr at LeftBBox
     ; LeftChild is at +8
     with r14
     add #8                      ; r14 at LeftChild
@@ -355,15 +355,15 @@ _after_right_near:
     ; === SUBSECTOR (AREA) PROCESSING ===
 _bsp_subsector:
     ; r8 = $8000 | area_byte_offset
-    ; Strip $8000 flag by adding $8000 (wraps: $8000+offset + $8000 = offset)
+    ; Strip $8000 flag
     iwt r0, #$8000
     from r8
-    add r0                      ; r0 = area byte offset (stripped $8000)
+    add r0                      ; r0 = area byte offset
 
     ; Read area data from ROM
     iwt r1, #(bsp_areas - $8000)
     to r14
-    add r1                      ; r14 -> area: numSegs(1), segOffset(2), sector(1)
+    add r1                      ; r14 -> area data
 
     to r11
     getb                        ; r11 = numSegs
@@ -371,212 +371,150 @@ _bsp_subsector:
     getb
     inc r14
     to r10
-    getbh                       ; r10 = segOffset (byte offset from bsp_segs)
+    getbh                       ; r10 = segOffset
     inc r14
 
     ; Compute absolute ROM address of first seg
     iwt r0, #(bsp_segs - $8000)
-    from r10
-    to r10
+    with r10
     add r0                      ; r10 = ROM addr of first seg
+
+    ; Save BSP stack pointer before segment processing
+    sm ($000E), r9
 
     ; Process each segment in this subsector
 _seg_loop:
     moves r0, r11
     bne _seg_has_more
     nop
-    ; No more segs — long branch to _seg_done
     iwt r15, #(_seg_done - $8000)
     nop
 _seg_has_more:
 
     ; Save loop state
-    sm ($0156), r11             ; remaining seg count
-    sm ($0158), r10             ; current seg ROM addr
-    sm ($015A), r9              ; BSP stack ptr (preserve during seg processing)
+    sm ($000A), r11             ; remaining seg count
+    sm ($000C), r10             ; current seg ROM addr
 
     ; === Read segment data ===
     move r14, r10
-    ; V1 offset
+    ; V1 offset (2 bytes)
     getb
     inc r14
     to r1
-    getbh                       ; r1 = v1 byte offset into vertex array
+    getbh                       ; r1 = v1 byte offset
     inc r14
-    ; V2 offset
+    ; V2 offset (2 bytes)
     getb
     inc r14
     to r2
-    getbh                       ; r2 = v2 byte offset into vertex array
+    getbh                       ; r2 = v2 byte offset
     inc r14
     ; Skip flags (1 byte)
     inc r14
-    ; Wall color
+    ; Wall color (1 byte)
     to r3
     getb                        ; r3 = wallColor
-    sm ($015C), r3              ; save wallColor
+    sm ($0010), r3              ; save wallColor
 
-    ; === Process this segment: rotate vertices, project, fill columns ===
     ; Save vertex offsets
-    sm ($015E), r1              ; v1 offset
-    sm ($0160), r2              ; v2 offset
+    sm ($0012), r1              ; v1 offset
+    sm ($0014), r2              ; v2 offset
 
-    ; --- Rotate vertex 1 ---
-    lm r1, ($015E)              ; v1 byte offset
-    ; Check if already rotated: RAM_ROTVERTS + v1_offset has rotY
-    ; v1_offset is vertex_index * 4, and RAM_ROTVERTS also uses 4 bytes per vert
-    ; So RAM address = RAM_ROTVERTS + v1_byte_offset
-    iwt r0, #RAM_ROTVERTS
-    from r1
-    to r7
-    add r0                      ; r7 = RAM addr of rotated v1
-    to r0
-    ldw (r7)                    ; r0 = rotY of v1
-    iwt r4, #$8000
-    from r0
-    cmp r4
-    beq _v1_need_rotate
-    nop
-    ; Already rotated — long branch
-    iwt r15, #(_v1_already_rotated - $8000)
-    nop
-_v1_need_rotate:
+    ; === SEGMENT PROCESSING: rotate, project, fill columns ===
+    ; Uses SAFE addressing: move+with+add (never stacked from/to)
 
-    ; Not rotated — compute rotation
-    ; Read original vertex from ROM
+    ; --- Read + rotate vertex 1 ---
+    lm r1, ($0012)              ; v1 byte offset
     iwt r0, #(bsp_vertices - $8000)
-    from r1
-    to r14
-    add r0                      ; r14 -> vertex X, Y in ROM
-
+    move r14, r1
+    with r14
+    add r0                      ; r14 -> vertex data (SAFE: move+with+add)
     getb
     inc r14
     to r3
-    getbh                       ; r3 = vertexX
+    getbh                       ; r3 = v1.x
     inc r14
     getb
     inc r14
     to r4
-    getbh                       ; r4 = vertexY
+    getbh                       ; r4 = v1.y
 
-    ; dx = vertexX - viewX, dy = vertexY - viewY
+    ; Translate to player-relative coords
     lm r0, (RAM_VIEWX)
-    from r3
-    to r3
-    sub r0                      ; r3 = dx = vertexX - viewX
+    with r3
+    sub r0                      ; r3 = dx1
     lm r0, (RAM_VIEWY)
-    from r4
-    to r4
-    sub r0                      ; r4 = dy = vertexY - viewY
+    with r4
+    sub r0                      ; r4 = dy1
 
-    ; rotY = cos*dx + sin*dy (following Doom's rlsegs2.a)
-    lm r6, (RAM_COS)
-    move r0, r3                 ; r0 = dx
-    fmult
-    rol                         ; r0 = cos * dx (world units)
-    move r5, r0                 ; r5 = cos*dx
-
-    lm r6, (RAM_SIN)
-    move r0, r4                 ; r0 = dy
-    fmult
-    rol                         ; r0 = sin * dy
-    with r5
-    add r0                      ; r5 = cos*dx + sin*dy = rotY
-
-    ; Subtract screen plane distance
-    with r5
-    sub #SCREEN_PLANE           ; r5 = rotY - 4
-
-    ; rotX = sin*dx - cos*dy
-    lm r6, (RAM_SIN)
-    move r0, r3                 ; r0 = dx
-    fmult
-    rol                         ; r0 = sin * dx
-    move r8, r0                 ; r8 = sin*dx (temporarily reusing r8)
-
-    lm r6, (RAM_COS)
-    move r0, r4                 ; r0 = dy
-    fmult
-    rol                         ; r0 = cos * dy
-    from r8
-    sub r0                      ; r0 = sin*dx - cos*dy = rotX
-
-    ; Store rotated vertex
-    ; r7 = RAM addr, r5 = rotY, r0 = rotX
-    from r5
-    stw (r7)                    ; store rotY
-    inc r7
-    inc r7
-    stw (r7)                    ; store rotX (r0)
-    dec r7
-    dec r7
-
-_v1_already_rotated:
-    ; Load rotated v1: r5 = rotY1, r6 = rotX1
-    ; r7 = RAM addr of v1
-    to r5
-    ldw (r7)                    ; r5 = rotY1
-    inc r7
-    inc r7
-    to r6
-    ldw (r7)                    ; r6 = rotX1
-    sm ($0162), r5              ; save rotY1
-    sm ($0164), r6              ; save rotX1
-
-    ; --- Rotate vertex 2 ---
-    lm r2, ($0160)              ; v2 byte offset
-    iwt r0, #RAM_ROTVERTS
-    from r2
-    to r7
-    add r0                      ; r7 = RAM addr of rotated v2
-    to r0
-    ldw (r7)
-    iwt r4, #$8000
-    from r0
-    cmp r4
-    beq _v2_need_rotate
-    nop
-    iwt r15, #(_v2_already_rotated - $8000)
-    nop
-_v2_need_rotate:
-
-    ; Not rotated — compute rotation (same as v1)
-    iwt r0, #(bsp_vertices - $8000)
-    from r2
-    to r14
-    add r0
-
-    getb
-    inc r14
-    to r3
-    getbh                       ; r3 = vertexX
-    inc r14
-    getb
-    inc r14
-    to r4
-    getbh                       ; r4 = vertexY
-
-    lm r0, (RAM_VIEWX)
-    from r3
-    to r3
-    sub r0                      ; r3 = dx
-    lm r0, (RAM_VIEWY)
-    from r4
-    to r4
-    sub r0                      ; r4 = dy
-
+    ; Rotate vertex 1: rotY = cos*dx + sin*dy, rotX = sin*dx - cos*dy
     lm r6, (RAM_COS)
     move r0, r3
     fmult
     rol
-    move r5, r0                 ; cos*dx
+    move r5, r0                 ; r5 = cos*dx1
 
     lm r6, (RAM_SIN)
     move r0, r4
     fmult
     rol
     with r5
-    add r0                      ; rotY = cos*dx + sin*dy
+    add r0                      ; r5 = rotY1 = cos*dx + sin*dy
+    with r5
+    sub #SCREEN_PLANE           ; r5 -= 4
+
+    lm r6, (RAM_SIN)
+    move r0, r3
+    fmult
+    rol
+    move r7, r0                 ; r7 = sin*dx1
+
+    lm r6, (RAM_COS)
+    move r0, r4
+    fmult
+    rol
+    from r7
+    sub r0                      ; r0 = rotX1 = sin*dx - cos*dy
+
+    sm ($0016), r5              ; save rotY1
+    sm ($0018), r0              ; save rotX1
+
+    ; --- Read vertex 2 from ROM ---
+    lm r2, ($0014)
+    iwt r0, #(bsp_vertices - $8000)
+    move r14, r2
+    with r14
+    add r0                      ; SAFE: move+with+add
+    getb
+    inc r14
+    to r3
+    getbh                       ; r3 = v2.x
+    inc r14
+    getb
+    inc r14
+    to r4
+    getbh                       ; r4 = v2.y
+
+    lm r0, (RAM_VIEWX)
+    with r3
+    sub r0                      ; r3 = dx2
+    lm r0, (RAM_VIEWY)
+    with r4
+    sub r0                      ; r4 = dy2
+
+    ; Rotate vertex 2
+    lm r6, (RAM_COS)
+    move r0, r3
+    fmult
+    rol
+    move r5, r0
+
+    lm r6, (RAM_SIN)
+    move r0, r4
+    fmult
+    rol
+    with r5
+    add r0
     with r5
     sub #SCREEN_PLANE
 
@@ -584,390 +522,280 @@ _v2_need_rotate:
     move r0, r3
     fmult
     rol
-    move r8, r0                 ; sin*dx
+    move r7, r0
 
     lm r6, (RAM_COS)
     move r0, r4
     fmult
     rol
-    from r8
-    sub r0                      ; rotX = sin*dx - cos*dy
+    from r7
+    sub r0                      ; r0 = rotX2
 
-    from r5
-    stw (r7)
-    inc r7
-    inc r7
-    stw (r7)
-    dec r7
-    dec r7
+    sm ($001A), r5              ; save rotY2
+    sm ($001C), r0              ; save rotX2
 
-_v2_already_rotated:
-    ; Load rotated v2
-    to r5
-    ldw (r7)                    ; r5 = rotY2
-    inc r7
-    inc r7
-    to r6
-    ldw (r7)                    ; r6 = rotX2
-    sm ($0166), r5              ; save rotY2
-    sm ($0168), r6              ; save rotX2
-
-    ; === Visibility checks ===
-    ; Skip if both vertices behind camera (rotY <= 0)
-    lm r5, ($0162)              ; rotY1
-    lm r3, ($0166)              ; rotY2
-    moves r0, r5
-    bpl _v1_in_front
-    nop
-    ; v1 behind. Check v2.
-    moves r0, r3
-    bpl _at_least_one_front
-    nop
-    ; Both behind — skip this segment
-    iwt r15, #(_seg_next - $8000)
-    nop
-_v1_in_front:
-_at_least_one_front:
-
-    ; === Back-face cull ===
-    ; Cross product of segment direction and view-to-v1 direction
-    ; segDX = rotX2 - rotX1, segDY = rotY2 - rotY1
-    ; viewDX = rotX1, viewDY = rotY1 (from origin since already translated)
-    ; Cross = segDX * rotY1 - segDY * rotX1
-    ; If cross < 0: back-facing, skip
-    lm r1, ($0164)              ; rotX1
-    lm r2, ($0162)              ; rotY1
-    lm r3, ($0168)              ; rotX2
-    lm r4, ($0166)              ; rotY2
-
-    ; segDX = rotX2 - rotX1
-    from r3
-    to r5
-    sub r1                      ; r5 = segDX
-
-    ; segDY = rotY2 - rotY1
-    from r4
-    to r7
-    sub r2                      ; r7 = segDY
-
-    ; Cross = segDX * rotY1 - segDY * rotX1
-    move r6, r5                 ; r6 = segDX
-    move r0, r2                 ; r0 = rotY1
-    lmult                       ; R0:R4 = segDX * rotY1
-    move r5, r0                 ; high word
-    move r8, r4                 ; low word
-
-    move r6, r7                 ; r6 = segDY
-    move r0, r1                 ; r0 = rotX1
-    lmult                       ; R0:R4 = segDY * rotX1
-
-    ; Cross = (r5:r8) - (r0:r4)
-    with r8
-    sub r4
-    with r5
-    sbc r0
-
-    ; If cross < 0: back-facing, skip (long branch)
-    moves r0, r5
-    bpl _not_backface
-    nop
-    iwt r15, #(_seg_next - $8000)
-    nop
-_not_backface:
-
-    ; === Clamp depths: if a vertex is behind camera, set depth = 1 ===
-    lm r1, ($0162)              ; rotY1
-    lm r2, ($0164)              ; rotX1
-    lm r3, ($0166)              ; rotY2
-    lm r4, ($0168)              ; rotX2
+    ; === Skip if both behind camera ===
+    lm r1, ($0016)              ; rotY1
+    lm r2, ($001A)              ; rotY2
     moves r0, r1
-    bpl _y1_ok
+    bpl _v_front
     nop
-    ibt r1, #1                  ; clamp depth to 1
-    ; Clip rotX1 towards rotX2 (simplified: just use rotX2)
-    move r2, r4
+    moves r0, r2
+    bpl _v_front
+    nop
+    iwt r15, #(_seg_next - $8000)
+    nop
+_v_front:
+
+    ; === Clamp depths to >= 1 (prevent divide-by-zero) ===
+    lm r1, ($0016)              ; rotY1
+    lm r2, ($0018)              ; rotX1
+    lm r3, ($001A)              ; rotY2
+    lm r4, ($001C)              ; rotX2
+    ; Clamp rotY1: must be > 0 (not just >= 0!)
+    moves r0, r1
+    bmi _y1_clamp
+    nop
+    bne _y1_ok                  ; positive non-zero → OK
+    nop
+_y1_clamp:
+    ibt r1, #4                  ; clamp to 4 (screen plane dist)
+    move r2, r4                 ; use rotX2 as approximation
 _y1_ok:
+    ; Clamp rotY2: must be > 0
     moves r0, r3
-    bpl _y2_ok
+    bmi _y2_clamp
     nop
-    ibt r3, #1
+    bne _y2_ok
+    nop
+_y2_clamp:
+    ibt r3, #4
     move r4, r2
 _y2_ok:
-    ; r1=Y1, r2=X1, r3=Y2, r4=X2 (all positive depths)
 
-    ; === Project to screen X ===
-    ; screenX = rotX * 27 / rotY * 4 + HALF_W
-    ; Using tile columns: tileCol = rotX * 13 / rotY + 13
-    ; (13 = NUM_COLS/2 = 27/2, we use 13 and add 0.5 by rounding)
+    ; === Project: col = (rotX * 13 / rotY) + 13 ===
+    ; Uses 16-iteration binary divide (guaranteed termination)
 
-    ; Project vertex 1: screenX1 = rotX1 * 27 / rotY1
-    ; Step 1: rotX1 * 27 (fits in s16 for our map size)
-    move r0, r2                 ; r0 = rotX1
-    iwt r6, #27
-    lmult                       ; R0:R4 = rotX1 * 27
-    ; For small values, result is in R4 (low word)
-    ; Use R4 as numerator for divide
-    move r5, r4                 ; r5 = rotX1 * 27 (low 16 bits)
-    move r7, r0                 ; r7 = high word (for overflow check)
-
-    ; Divide r5 by r1 (rotY1)
-    ; Handle sign: r5 could be negative
-    sm ($016A), r1              ; save rotY1 for later
-    sm ($016C), r2              ; save rotX1
-    sm ($016E), r3              ; save rotY2
-    sm ($0170), r4              ; save rotX2
-
-    ; Signed divide: r5 / r1 -> result in r0
-    ; numerator in r5, denominator in r1
-    ibt r11, #0                 ; sign flag
-    moves r0, r5
-    bpl _d1_npos
+    ; --- Project V1 ---
+    ; Use repeated subtraction for divide (max quotient ~27, fast enough)
+    ; Numerator = |rotX1| * 13, Denominator = rotY1
+    ibt r5, #0                  ; sign flag
+    moves r0, r2               ; r2 = rotX1
+    bpl _px1_pos
     nop
-    with r5
+    from r2
     not
-    inc r5
-    ibt r11, #1
-_d1_npos:
-    ; r1 (rotY1) is always positive (we clamped it)
-    ; 16-bit unsigned divide: r5 / r1
+    inc r0
+    move r2, r0
+    ibt r5, #1
+_px1_pos:
+    ; r2 = |rotX1|, r5 = sign
+    ; Compute |rotX1| * 13 = |X|*8 + |X|*4 + |X| (using only safe patterns)
+    move r0, r2
+    add r0                      ; r0 = |X|*2
+    add r0                      ; r0 = |X|*4
+    add r0                      ; r0 = |X|*8
+    move r7, r0                 ; r7 = |X|*8
+    move r0, r2
+    add r0                      ; r0 = |X|*2
+    add r0                      ; r0 = |X|*4
+    with r7
+    add r0                      ; r7 = |X|*12
+    with r7
+    add r2                      ; r7 = |X|*13
+    ; Binary divide: r7 / r1 → r3 (16 iterations, always terminates)
     ibt r2, #0                  ; remainder
     ibt r3, #0                  ; quotient
-    iwt r12, #16                ; loop counter
-_div1_loop:
-    with r5
-    add r5                      ; shift numerator left, MSB to carry
+    iwt r12, #16
+_bdiv1:
+    with r7
+    add r7                      ; shift num left, MSB → carry
     with r2
-    rol                         ; remainder = (remainder << 1) | carry
+    rol                         ; remainder = (rem << 1) | carry
     with r3
     add r3                      ; quotient <<= 1
     from r2
     cmp r1                      ; remainder >= divisor?
-    blt _div1_nosub
+    blt _bdiv1_ns
     nop
     with r2
-    sub r1                      ; remainder -= divisor
-    inc r3                      ; quotient |= 1
-_div1_nosub:
-    dec r12
-    bne _div1_loop
-    nop
-    ; r3 = quotient = |rotX1 * 27 / rotY1|
-
-    ; Apply sign
-    moves r0, r11
-    beq _d1_done
-    nop
-    with r3
-    not
+    sub r1
     inc r3
-_d1_done:
-    ; r3 = rotX1 * 27 / rotY1 (signed)
-    ; screenX1 = r3 * 4 + HALF_W
-    with r3
-    add r3                      ; r3 *= 2
-    with r3
-    add r3                      ; r3 *= 2 (total: *4)
-    iwt r0, #HALF_W
-    with r3
-    add r0                      ; r3 = screenX1 in pixels
-    sm ($0172), r3              ; save screenX1
-
-    ; Project vertex 2: same procedure
-    lm r2, ($0170)              ; rotX2 (saved earlier... wait, r4 was overwritten)
-    ; Reload from saved values
-    lm r4, ($0168)              ; rotX2 (original)
-    lm r1, ($016E)              ; rotY2
-
-    ; rotX2 * 27
-    move r0, r4
-    iwt r6, #27
-    lmult
-    move r5, r4                 ; r5 = rotX2 * 27 (low word)
-
-    ; Signed divide: r5 / r1
-    ibt r11, #0
-    moves r0, r5
-    bpl _d2_npos
+_bdiv1_ns:
+    dec r12
+    bne _bdiv1
     nop
-    with r5
+    ; r3 = |rotX1*13| / rotY1
+    ; Apply sign, add center offset
+    moves r0, r5
+    beq _px1_ns
+    nop
+    from r3
     not
-    inc r5
-    ibt r11, #1
-_d2_npos:
+    inc r0
+    move r3, r0
+_px1_ns:
+    with r3
+    add #13
+    move r11, r3                ; save col1 in r11 (avoids sm/lm bug)
+
+    ; --- Project V2 ---
+    lm r4, ($001C)              ; reload rotX2
+    lm r1, ($001A)              ; r1 = rotY2 (new divisor)
+    ; Ensure rotY2 >= 4
+    ibt r0, #4
+    from r1
+    cmp r0
+    bge _ry2ok
+    nop
+    ibt r1, #4
+_ry2ok:
+    ibt r5, #0
+    moves r0, r4
+    bpl _px2_pos
+    nop
+    from r4
+    not
+    inc r0
+    move r4, r0
+    ibt r5, #1
+_px2_pos:
+    ; r4 = |rotX2|, r3 = rotY2
+    move r0, r4
+    add r0
+    add r0
+    add r0
+    move r7, r0                 ; r7 = r4*8
+    move r0, r4
+    add r0
+    add r0
+    with r7
+    add r0                      ; r7 = r4*8 + r4*4 = r4*12
+    with r7
+    add r4                      ; r7 = r4*13
+    ; Binary divide: r7 / r1 → r3
     ibt r2, #0
     ibt r3, #0
     iwt r12, #16
-_div2_loop:
-    with r5
-    add r5
+_bdiv2:
+    with r7
+    add r7
     with r2
     rol
     with r3
     add r3
     from r2
     cmp r1
-    blt _div2_nosub
+    blt _bdiv2_ns
     nop
     with r2
     sub r1
     inc r3
-_div2_nosub:
+_bdiv2_ns:
     dec r12
-    bne _div2_loop
+    bne _bdiv2
     nop
-
-    moves r0, r11
-    beq _d2_done
+    moves r0, r5
+    beq _px2_ns
     nop
-    with r3
+    from r3
     not
-    inc r3
-_d2_done:
+    inc r0
+    move r3, r0
+_px2_ns:
     with r3
-    add r3
-    with r3
-    add r3
-    iwt r0, #HALF_W
-    with r3
-    add r0
-    sm ($0174), r3              ; save screenX2
+    add #13
+    ; col2 is in r3, col1 is in r11
+    move r4, r3                 ; r4 = col2
+    move r3, r11                ; r3 = col1 (restored from register)
 
     ; === Determine column range ===
-    lm r1, ($0172)              ; screenX1 (pixels)
-    lm r2, ($0174)              ; screenX2 (pixels)
 
-    ; Ensure x1 <= x2 (swap if needed, also swap depths)
-    from r1
-    cmp r2
+    ; Ensure col1 <= col2 (swap if needed, also swap depths)
+    from r3
+    cmp r4
     blt _no_swap
     beq _no_swap
     nop
-    ; Swap
-    move r0, r1
-    move r1, r2
-    move r2, r0
-    ; Also swap depths
-    lm r3, ($016A)              ; rotY1
-    lm r4, ($016E)              ; rotY2
-    sm ($016A), r4
-    sm ($016E), r3
+    move r0, r3
+    move r3, r4
+    move r4, r0
+    lm r0, ($0016)
+    lm r1, ($001A)
+    sm ($0016), r1
+    sm ($001A), r0
 _no_swap:
-    ; r1 = leftX (pixels), r2 = rightX (pixels)
-    ; Clamp to viewport: 0..215
-    moves r0, r1
-    bpl _x1_pos
+    ; Clamp both to 0..26
+    moves r0, r3
+    bpl _c1_min_ok
     nop
-    ibt r1, #0
-_x1_pos:
-    iwt r0, #215
-    from r2
+    ibt r3, #0
+_c1_min_ok:
+    ibt r0, #(NUM_COLS - 1)
+    from r3
     cmp r0
-    blt _x2_ok
-    beq _x2_ok
+    blt _c1_max_ok
+    beq _c1_max_ok
     nop
-    iwt r2, #215
-_x2_ok:
-    ; Skip if entirely off-screen (long branch)
-    from r2
-    cmp r1
+    ibt r3, #(NUM_COLS - 1)
+_c1_max_ok:
+    moves r0, r4
+    bpl _c2_min_ok
+    nop
+    ibt r4, #0
+_c2_min_ok:
+    ibt r0, #(NUM_COLS - 1)
+    from r4
+    cmp r0
+    blt _c2_max_ok
+    beq _c2_max_ok
+    nop
+    ibt r4, #(NUM_COLS - 1)
+_c2_max_ok:
+    ; Skip if offscreen
+    from r4
+    cmp r3
     bge _not_offscreen
     nop
     iwt r15, #(_seg_next - $8000)
     nop
 _not_offscreen:
+    ; FORCE col1=0, col2=26
+    ibt r3, #0
+    ibt r4, #26
 
-    ; Convert to tile columns: col = pixelX / 8
-    from r1
-    lsr
-    lsr
-    to r3
-    lsr                         ; r3 = leftCol = leftX / 8
-    from r2
-    lsr
-    lsr
-    to r4
-    lsr                         ; r4 = rightCol = rightX / 8
-
-    ; Clamp columns to 0..26
-    ibt r0, #(NUM_COLS - 1)
-    from r4
-    cmp r0
-    blt _col_ok
-    beq _col_ok
-    nop
-    ibt r4, #(NUM_COLS - 1)
-_col_ok:
-
-    ; === Fill columns ===
-    ; For each column from r3 (leftCol) to r4 (rightCol):
-    ;   if not filled: compute wall height, fill column
-    lm r5, ($015C)              ; wallColor
-    lm r7, ($016A)              ; rotY1 (depth at left edge)
-    lm r8, ($016E)              ; rotY2 (depth at right edge)
-
-_fill_col_loop:
-    ; Check if column already filled
-    iwt r0, #RAM_COLFILLED
-    from r3
-    to r14
-    add r0                      ; r14 would need to be ROM... but this is RAM
-    ; Use ldb for RAM read instead
-    iwt r0, #RAM_COLFILLED
-    from r3
-    to r1
-    add r0                      ; r1 = RAM addr of columnFilled[col]
-    to r0
-    ldb (r1)                    ; r0 = columnFilled[col]
-    beq _fill_this_col          ; not filled, process it
-    nop
-    iwt r15, #(_fill_next_col - $8000)
-    nop
-_fill_this_col:
-
-    ; Interpolate depth for this column
-    ; For simplicity, use average of Y1 and Y2 for now
-    ; (proper interpolation would weight by column position within segment)
-    from r7
-    to r0
-    add r8                      ; r0 = Y1 + Y2
-    lsr                         ; r0 = (Y1 + Y2) / 2 = average depth
-
-    ; Ensure depth >= 1
-    bne _depth_ok
+    ; === Fill columns col1..col2 ===
+    ; Use average depth for wall height (simplified)
+    lm r7, ($0016)              ; rotY1
+    lm r8, ($001A)              ; rotY2
+    move r0, r7
+    with r0
+    add r8                      ; r0 = rotY1 + rotY2 (SAFE)
+    lsr                         ; r0 = avg depth
+    bne _davg_ok
     nop
     ibt r0, #1
-_depth_ok:
-    ; Wall height = WALL_CONST / depth = 576 / depth
-    ; Using divide: numerator = 576, divisor = depth
-    move r1, r0                 ; r1 = depth (divisor)
-    iwt r5, #WALL_CONST         ; r5 = 576 (numerator)
-
-    ; Unsigned divide: r5 / r1 -> wallHeight in r10
-    move r6, r5                 ; r6 = numerator (576)
-    ibt r2, #0                  ; remainder
+_davg_ok:
+    ; wallHeight = 576 / avgDepth (repeated subtraction)
+    move r1, r0                 ; r1 = divisor (avgDepth)
+    iwt r7, #WALL_CONST         ; r7 = 576
     ibt r10, #0                 ; quotient
-    iwt r12, #16
-_div3_loop2:
-    with r6
-    add r6
-    with r2
-    rol
-    with r10
-    add r10                     ; quotient <<= 1
-    from r2
-    cmp r1                      ; remainder >= divisor?
-    blt _div3_nosub
+_whdiv:
+    from r7
+    cmp r1
+    blt _whdiv_done
     nop
-    with r2
+    with r7
     sub r1
     inc r10
-_div3_nosub:
-    dec r12
-    bne _div3_loop2
+    ; Cap at SCREEN_H (no point computing higher)
+    iwt r0, #SCREEN_H
+    from r10
+    cmp r0
+    blt _whdiv
     nop
-    ; r10 = wallHeight = 576 / depth
-
-    ; Clamp wallHeight to SCREEN_H
+_whdiv_done:
+    ; r10 = wallHeight, clamp to SCREEN_H
     iwt r0, #SCREEN_H
     from r10
     cmp r0
@@ -977,160 +805,92 @@ _div3_nosub:
 _wh_ok:
     ; drawStart = HALF_H - wallHeight/2
     from r10
-    lsr                         ; r0 = wallHeight / 2
-    iwt r1, #HALF_H
-    from r1
-    to r2
-    sub r0                      ; r2 = HALF_H - wallHeight/2 = drawStart
-    ; Clamp drawStart >= 0
-    moves r0, r2
+    lsr                         ; r0 = wallHeight/2
+    move r5, r0                 ; r5 = half wall
+    iwt r6, #HALF_H
+    with r6
+    sub r5                      ; r6 = drawStart (SAFE: with)
+    moves r0, r6
     bpl _ds_ok
     nop
-    ibt r2, #0
+    ibt r6, #0
 _ds_ok:
-
-    ; drawEnd = HALF_H + wallHeight/2
-    from r10
-    lsr                         ; r0 = wallHeight / 2
-    iwt r1, #HALF_H
-    from r1
-    add r0                      ; r0 = HALF_H + wallHeight/2 = drawEnd
-    ; Clamp drawEnd <= SCREEN_H - 1
+    ; drawEnd = HALF_H + wallHeight/2 - 1
+    iwt r0, #HALF_H
+    from r0
+    add r5                      ; r0 = drawEnd
     iwt r1, #(SCREEN_H - 1)
     from r0
     cmp r1
     blt _de_ok
     beq _de_ok
     nop
-    iwt r0, #(SCREEN_H - 1)
+    move r0, r1
 _de_ok:
-    move r11, r0                ; r11 = drawEnd
+    move r7, r0                 ; r7 = drawEnd
 
-    ; Write to column buffer
-    ; drawStart[col]
-    iwt r0, #RAM_DRAWSTART
-    from r3
-    to r1
-    add r0
-    from r2
-    stb (r1)                    ; drawStart[col] = r2
+    lm r5, ($0010)              ; wallColor
 
-    ; drawEnd[col]
-    iwt r0, #RAM_DRAWEND
-    from r3
-    to r1
-    add r0
-    from r11
-    stb (r1)                    ; drawEnd[col] = r11
+    ; (diagnostics removed - using registers now)
 
-    ; wallColor[col]
-    lm r5, ($015C)              ; reload wallColor
-    iwt r0, #RAM_WALLCOLOR
-    from r3
-    to r1
-    add r0
+    ; === Fill ALL 27 columns from computed wall height ===
+    ; r6 = drawStart, r7 = drawEnd, r5 = wallColor (from wall height code above)
+    iwt r1, #RAM_DRAWSTART
+    iwt r2, #RAM_DRAWEND
+    iwt r3, #RAM_WALLCOLOR
+    iwt r8, #RAM_COLFILLED
+    ibt r4, #NUM_COLS
+_fill_loop:
+    ; Check colFilled (ldb doesn't set flags, so add #0 to set them)
+    ldb (r8)                    ; r0 = colFilled[col]
+    add #0                      ; set zero flag from r0 (ldb doesn't!)
+    bne _fill_skip              ; already filled → skip
+    nop
+    from r6
+    stb (r1)                    ; drawStart
+    from r7
+    stb (r2)                    ; drawEnd
     from r5
-    stb (r1)                    ; wallColor[col] = color
-
-    ; Mark column as filled
-    iwt r0, #RAM_COLFILLED
-    from r3
-    to r1
-    add r0
+    stb (r3)                    ; wallColor
     ibt r0, #1
-    stb (r1)                    ; columnFilled[col] = 1
-
-_fill_next_col:
-    ; Reload wallColor and depths for next iteration
-    lm r5, ($015C)
-    lm r7, ($016A)
-    lm r8, ($016E)
-    inc r3                      ; next column
-    from r4
-    cmp r3                      ; rightCol >= col? (swapped for bge)
-    blt _fill_col_done
+    stb (r8)                    ; mark filled
+_fill_skip:
+    inc r1
+    inc r2
+    inc r3
+    inc r8
+    with r4
+    sub #1
+    bne _fill_loop
     nop
-    iwt r15, #(_fill_col_loop - $8000)
-    nop
-_fill_col_done:
 
 _seg_next:
-    ; Advance to next seg in subsector
-    lm r10, ($0158)             ; current seg ROM addr
-    ibt r0, #SEG_SIZE           ; +11 bytes
-    with r10
-    add r0                      ; Hmm, 11 > 15 max for add #N
-    ; Need: r10 += 11. Use two adds: +8 then +3
-    ; Actually, we use with r10; add r0 where r0 = 11
-    ; But add rN uses register not immediate for values > 15
-    ; Wait, `with r10; add r0` means r10 = r10 + r0, where r0 = 11 (set by ibt)
-    ; ibt r0, #11 → r0 = 11 (sign extended: 11 is fine, < 128)
-    ; Then: with r10; add r0 → r10 = r10 + 11. But `add rN` format?
-    ; Actually `add rN` is: DREG = SREG + rN. Default DREG=SREG=R0.
-    ; with r10: DREG=r10, SREG=r10. So `with r10; add r0` = r10 = r10 + r0. Yes!
-
-    ; Recalculate properly:
-    lm r10, ($0158)
+    ; Advance to next seg
+    lm r10, ($000C)
     ibt r0, #SEG_SIZE
     with r10
     add r0                      ; r10 += 11
 
-    lm r11, ($0156)             ; remaining seg count
+    lm r11, ($000A)             ; remaining count
     with r11
-    sub #1                      ; --numSegs
-    lm r9, ($015A)              ; restore BSP stack ptr
+    sub #1
+    lm r9, ($000E)              ; restore BSP stack
 
-    ; Continue seg loop
     iwt r15, #(_seg_loop - $8000)
     nop
 
 _seg_done:
-    ; Return from subsector — pop return address from BSP stack
-    lm r9, ($015A)              ; restore BSP stack ptr (in case it wasn't saved)
+    ; Return from subsector
+    lm r9, ($000E)
     dec r9
     dec r9
     to r0
-    ldw (r9)                    ; r0 = return address
-    move r15, r0                ; jump
+    ldw (r9)
+    move r15, r0
     nop
 
 _bsp_done:
-    ; BSP traversal complete.
-    ; TEST: Fill columns using visit count + angle to verify traversal worked
-    lm r5, (RAM_ANGLE)          ; r5 = angle (0-255)
-    lm r6, ($0180)              ; r6 = subsector visit count
-
-    ; Fill 27 columns: height based on angle, color based on visit count
-    iwt r1, #RAM_DRAWSTART
-    iwt r2, #RAM_DRAWEND
-    iwt r3, #RAM_WALLCOLOR
-    ibt r4, #NUM_COLS
-_bsp_diag_fill:
-    ; drawStart = angle/2
-    move r0, r5
-    lsr                         ; r0 = angle/2
-    stb (r1)
-    inc r1
-
-    ; drawEnd = 143 - angle/2
-    move r0, r5
-    lsr
-    iwt r7, #143
-    from r7
-    sub r0
-    stb (r2)
-    inc r2
-
-    ; wallColor = 1 (brown, known visible)
-    ibt r0, #1
-    stb (r3)
-    inc r3
-
-    with r4
-    sub #1
-    bne _bsp_diag_fill
-    nop
-
+    ; BSP traversal + segment processing complete
     ; Fall through to Phase 2 tile rendering.
 
     ; =================================================================
