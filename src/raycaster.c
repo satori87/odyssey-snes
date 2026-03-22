@@ -207,9 +207,9 @@ void handleInput(void) {
  *   5. Loop
  * ============================================ */
 int main(void) {
+    disableNMI();
     initMode3Display();
     initGSU();
-    disableNMI();
     initPlayer();
 
     while (1) {

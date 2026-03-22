@@ -80,7 +80,7 @@ _IRQBottom:
     sta.l $2100
 
     ; === Give SNES access to SuperFX RAM for DMA ===
-    lda #$17
+    lda #$16
     sta.l $303A          ; SCMR: SNES has RAM (ROM=SuperFX, RAM=SNES)
 
     ; === Configure VRAM address and increment ===
@@ -119,7 +119,7 @@ _IRQBottom:
     sta.l $420B          ; MDMAEN: enable channel 0
 
     ; === Give GSU back RAM access ===
-    lda #$1F
+    lda #$1E
     sta.l $303A          ; SCMR: GSU has ROM+RAM
 
     ; === Set DMA_DONE flag ===
@@ -319,60 +319,31 @@ initMode3Display:
     sta.l $2116          ; VMADDL/VMADDH = $4000
     sep #$20
 
-    ; Tile index counter
-    ldx #$0000           ; tile index (0-239)
-    ldy #$0000           ; row counter (0-31)
-@TM_RowLoop:
-    cpy #$000C           ; 12 tile rows for viewport
-    bcs @TM_BlankRow
-
-    ; Columns 0-19: viewport tiles
-    phx                  ; save tile index on stack
-    ldx #$0000           ; column counter
-@TM_ColLoop:
-    cpx #$0014           ; 20 columns
-    bcs @TM_PadCol
-
-    ; Write tile index (16-bit: lo then hi via $2118/$2119)
-    ; Pull current tile index from stack, write, push incremented
-    ply                  ; Y = current tile index
+    ; === Step 1: Clear entire 32x32 tilemap to tile 0 ===
     rep #$20
-    tya
-    sta.l $2118          ; VMDATAL/VMDATAH (writes both bytes, auto-increments VRAM addr)
-    sep #$20
-    iny                  ; next tile index
-    phy                  ; save it back
-    inx
-    bra @TM_ColLoop
-
-@TM_PadCol:
-    ; Columns 20-31: blank tiles (tile 0 = black)
-    rep #$20
+    ldx #$0400           ; 1024 entries
+@TM_Clear:
     lda #$0000
-    sta.l $2118
+    sta.l $2118          ; write tile 0
+    dex
+    bne @TM_Clear
     sep #$20
-    inx
-    cpx #$0020           ; 32 columns total
-    bne @TM_PadCol
 
-    plx                  ; restore tile index (was on stack from phy)
-    iny                  ; next row
-    bra @TM_RowLoop
-
-@TM_BlankRow:
-    ; Rows 12-31: all blank tiles
+    ; === Step 2: Overwrite row 0 viewport tiles (0-19) ===
+    ; Re-set VRAM address to tilemap base
+    rep #$20
+    lda #$4000
+    sta.l $2116
+    ; Write tile indices 0-19 for viewport row 0
     ldx #$0000
-@TM_BlankCol:
+@TM_ViewRow0:
     rep #$20
-    lda #$0000
+    txa
     sta.l $2118
     sep #$20
     inx
-    cpx #$0020           ; 32 columns
-    bne @TM_BlankCol
-    iny
-    cpy #$0020           ; 32 rows total
-    bne @TM_RowLoop
+    cpx #$0014           ; 20 tiles
+    bne @TM_ViewRow0
 
     ; === Clear tile character data at VRAM $0000 ===
     ; 240 tiles * 32 words each = 7680 words
@@ -411,7 +382,7 @@ initGSU:
     sta.l $3039          ; CLSR = 21 MHz
     lda #$A0
     sta.l $3037          ; CFGR
-    lda #$1F
+    lda #$1E
     sta.l $303A          ; SCMR: 160px wide, 256-color, GSU has ROM+RAM
     lda #$01
     sta.l $3038          ; SCBR: screen base = $70:0400 (bank 1 * $400)
@@ -481,7 +452,7 @@ writePlayerState:
     rep #$10
 
     ; === Give SNES access to SuperFX RAM ===
-    lda #$17
+    lda #$16
     sta.l $303A          ; SCMR: SNES has RAM
 
     rep #$20
@@ -513,7 +484,7 @@ writePlayerState:
     sep #$20
 
     ; === Give GSU back RAM access ===
-    lda #$1F
+    lda #$1E
     sta.l $303A          ; SCMR: GSU has ROM+RAM
 
     plp
@@ -553,89 +524,47 @@ dmaFramebuffer:
     php
     sep #$20
     rep #$10
-
-    ; Give SNES RAM access for DMA
-    lda #$17
+    ; Force blank
+    lda #$80
+    sta.l $2100
+    ; Give SNES RAM access
+    lda #$16
     sta.l $303A
-
-    ; DMA setup: word-mode to $2118/$2119 (same for all 3 batches)
+    ; VMAIN: word increment
+    lda #$80
+    sta.l $2115
+    ; VRAM addr = $0000
+    rep #$20
+    lda #$0000
+    sta.l $2116
+    sep #$20
+    ; DMA setup: word-mode to $2118/$2119
     lda #$01
     sta.l $4300          ; DMAP: 2-register word write
     lda #$18
     sta.l $4301          ; BBAD: $2118 (VMDATAL)
-    lda #$70
-    sta.l $4304          ; source bank $70
-    lda #$80
-    sta.l $2115          ; VMAIN: word increment
-
-    ; === Batch 1: rows 0-3 (5120 bytes) during VBlank ===
-@WV1:
-    lda.l $4212
-    and #$80
-    beq @WV1
     rep #$20
-    lda #$0000
-    sta.l $2116          ; VRAM addr
     lda #$0400
-    sta.l $4302          ; source: $70:0400
-    lda #5120
-    sta.l $4305
-    sep #$20
-    lda #$01
-    sta.l $420B
-
-    ; === Batch 2: rows 4-7 (5120 bytes) during next VBlank ===
-@WNV2:
-    lda.l $4212
-    and #$80
-    bne @WNV2
-@WV2:
-    lda.l $4212
-    and #$80
-    beq @WV2
-    rep #$20
-    lda #$0000 + 2560    ; VRAM word addr after batch 1
-    sta.l $2116
-    lda #$0400 + 5120    ; source offset after batch 1
     sta.l $4302
-    lda #5120
-    sta.l $4305
     sep #$20
-    lda #$01
-    sta.l $420B
-
-    ; === Batch 3: rows 8-11 (5120 bytes) during next VBlank ===
-@WNV3:
-    lda.l $4212
-    and #$80
-    bne @WNV3
-@WV3:
-    lda.l $4212
-    and #$80
-    beq @WV3
+    lda #$70
+    sta.l $4304
     rep #$20
-    lda #$0000 + 5120    ; VRAM word addr after batch 2
-    sta.l $2116
-    lda #$0400 + 10240   ; source offset after batch 2
-    sta.l $4302
-    lda #5120
+    lda #TILE_DATA_SIZE  ; 15360 bytes
     sta.l $4305
     sep #$20
     lda #$01
     sta.l $420B
-
     ; Give GSU back RAM
-    lda #$1F
+    lda #$1E
     sta.l $303A
-
-    ; Ensure display regs correct
+    ; Screen on with Mode 3
     lda #$03
     sta.l $2105          ; Mode 3
     lda #$01
     sta.l $212C          ; BG1
     lda #$0F
     sta.l $2100
-
     plp
     rtl
 
