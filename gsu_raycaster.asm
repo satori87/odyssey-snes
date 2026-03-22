@@ -760,109 +760,159 @@ _c2_max_ok:
     iwt r15, #(_seg_next - $8000)
     nop
 _not_offscreen:
-    ; FORCE col1=0, col2=26
-    ibt r3, #0
-    ibt r4, #26
+    ; r3 = col1, r4 = col2 (clamped 0..26, col1 <= col2)
+    ; DIAGNOSTIC: save col1/col2 using stw (not sm!)
+    iwt r9, #$0030
+    from r3
+    stw (r9)                    ; col1 → $0030
+    iwt r9, #$0032
+    from r4
+    stw (r9)                    ; col2 → $0032
 
-    ; === Fill columns col1..col2 ===
-    ; Use average depth for wall height (simplified)
-    lm r7, ($0016)              ; rotY1
-    lm r8, ($001A)              ; rotY2
-    move r0, r7
-    with r0
-    add r8                      ; r0 = rotY1 + rotY2 (SAFE)
-    lsr                         ; r0 = avg depth
-    bne _davg_ok
-    nop
-    ibt r0, #1
-_davg_ok:
-    ; wallHeight = 576 / avgDepth (repeated subtraction)
-    move r1, r0                 ; r1 = divisor (avgDepth)
-    iwt r7, #WALL_CONST         ; r7 = 576
-    ibt r10, #0                 ; quotient
-_whdiv:
-    from r7
-    cmp r1
-    blt _whdiv_done
-    nop
-    with r7
-    sub r1
-    inc r10
-    ; Cap at SCREEN_H (no point computing higher)
-    iwt r0, #SCREEN_H
-    from r10
-    cmp r0
-    blt _whdiv
-    nop
-_whdiv_done:
-    ; r10 = wallHeight, clamp to SCREEN_H
-    iwt r0, #SCREEN_H
-    from r10
-    cmp r0
-    blt _wh_ok
-    nop
-    iwt r10, #SCREEN_H
-_wh_ok:
-    ; drawStart = HALF_H - wallHeight/2
-    from r10
-    lsr                         ; r0 = wallHeight/2
-    move r5, r0                 ; r5 = half wall
-    iwt r6, #HALF_H
-    with r6
-    sub r5                      ; r6 = drawStart (SAFE: with)
-    moves r0, r6
-    bpl _ds_ok
-    nop
-    ibt r6, #0
-_ds_ok:
-    ; drawEnd = HALF_H + wallHeight/2 - 1
-    iwt r0, #HALF_H
-    from r0
-    add r5                      ; r0 = drawEnd
-    iwt r1, #(SCREEN_H - 1)
-    from r0
-    cmp r1
-    blt _de_ok
-    beq _de_ok
-    nop
-    move r0, r1
-_de_ok:
-    move r7, r0                 ; r7 = drawEnd
+    ; === Per-column wall height: compute depth per column in fill loop ===
+    lm r5, ($0010)              ; r5 = wallColor
+    ; r3 = col1, r4 = col2 (preserved)
 
-    lm r5, ($0010)              ; wallColor
-
-    ; (diagnostics removed - using registers now)
-
-    ; === Fill ALL 27 columns from computed wall height ===
-    ; r6 = drawStart, r7 = drawEnd, r5 = wallColor (from wall height code above)
-    iwt r1, #RAM_DRAWSTART
-    iwt r2, #RAM_DRAWEND
-    iwt r3, #RAM_WALLCOLOR
-    iwt r8, #RAM_COLFILLED
-    ibt r4, #NUM_COLS
-_fill_loop:
-    ; Check colFilled (ldb doesn't set flags, so add #0 to set them)
-    ldb (r8)                    ; r0 = colFilled[col]
-    add #0                      ; set zero flag from r0 (ldb doesn't!)
-    bne _fill_skip              ; already filled → skip
-    nop
+    ; Load segment depths
+    lm r6, ($0016)              ; r6 = rotY1
+    lm r7, ($001A)              ; r7 = rotY2
+    ; Clamp depths >= 4
+    ibt r0, #4
     from r6
-    stb (r1)                    ; drawStart
+    cmp r0
+    bge _fd1ok
+    nop
+    ibt r6, #4
+_fd1ok:
     from r7
-    stb (r2)                    ; drawEnd
+    cmp r0
+    bge _fd2ok
+    nop
+    ibt r7, #4
+_fd2ok:
+
+    ; Compute starting pointers: base + col1
+    move r1, r3
+    iwt r0, #RAM_DRAWSTART
+    with r1
+    add r0                      ; r1 = &drawStart[col1]
+
+    move r2, r3
+    iwt r0, #RAM_DRAWEND
+    with r2
+    add r0                      ; r2 = &drawEnd[col1]
+
+    move r8, r3
+    iwt r0, #RAM_WALLCOLOR
+    with r8
+    add r0                      ; r8 = &wallColor[col1]
+
+    move r10, r3
+    iwt r0, #RAM_COLFILLED
+    with r10
+    add r0                      ; r10 = &colFilled[col1]
+
+    ; numCols = col2 - col1 + 1
+    move r0, r4
+    with r0
+    sub r3
+    inc r0
+    move r11, r0                ; r11 = iteration count
+
+    ; For depth interpolation: use r6 as current depth
+    ; (r6 = rotY1 = depth at col1, r7 = rotY2 = depth at col2)
+    ; Simple approach: just use r6 (depth at V1) for all columns
+    ; TODO: interpolate between r6 and r7
+
+_fill_loop:
+    ldb (r10)                   ; r0 = colFilled[col]
+    add #0                      ; set flags (ldb doesn't!)
+    bne _fill_skip_long         ; already filled → skip
+    nop
+
+    ; Compute wallHeight = WALL_CONST / depth (r6)
+    ; Use repeated subtraction, capped at SCREEN_H
+    iwt r9, #WALL_CONST         ; r9 = 576 (numerator, r9 free here)
+    ibt r0, #0                  ; quotient
+_col_whdiv:
+    from r9
+    cmp r6                      ; 576_remaining >= depth?
+    blt _col_whdiv_done
+    nop
+    with r9
+    sub r6                      ; 576_remaining -= depth
+    inc r0                      ; quotient++
+    iwt r3, #SCREEN_H
+    from r0
+    cmp r3
+    blt _col_whdiv
+    nop
+_col_whdiv_done:
+    ; r0 = wallHeight, clamp
+    iwt r3, #SCREEN_H
+    from r0
+    cmp r3
+    blt _col_whok
+    nop
+    move r0, r3
+_col_whok:
+    ; drawStart = HALF_H - wallHeight/2, drawEnd = HALF_H + wallHeight/2
+    lsr                         ; r0 = wallHeight/2
+    move r3, r0                 ; r3 = halfWall (temp)
+    iwt r0, #HALF_H
+    with r0
+    sub r3                      ; r0 = drawStart = 72 - halfWall
+    moves r9, r0                ; r9 = drawStart (also sets flags)
+    bpl _col_dsok
+    nop
+    ibt r9, #0
+_col_dsok:
+    ; Store drawStart
+    from r9
+    stb (r1)
+
+    ; drawEnd = HALF_H + halfWall
+    iwt r0, #HALF_H
+    with r0
+    add r3                      ; r0 = 72 + halfWall
+    iwt r3, #(SCREEN_H - 1)
+    from r0
+    cmp r3
+    blt _col_deok
+    beq _col_deok
+    nop
+    move r0, r3
+_col_deok:
+    stb (r2)                    ; drawEnd (r0)
+
+    ; wallColor
     from r5
-    stb (r3)                    ; wallColor
+    stb (r8)
+
+    ; Mark filled
     ibt r0, #1
-    stb (r8)                    ; mark filled
-_fill_skip:
+    stb (r10)
+
+    ; Restore r3 = col1 for pointer math (clobbered by halfWall)
+    ; Actually r3 was used as temp. But we don't need col1 anymore in the loop.
+    ; The pointers (r1,r2,r8,r10) are incremented, r11 is the counter.
+
+    bra _fill_next
+    nop
+
+_fill_skip_long:
+_fill_next:
     inc r1
     inc r2
-    inc r3
     inc r8
-    with r4
+    inc r10
+    with r11
     sub #1
     bne _fill_loop
     nop
+
+    ; Restore r3 for _seg_next (it expects col-related state, but actually
+    ; _seg_next just loads from RAM so r3 doesn't matter)
 
 _seg_next:
     ; Advance to next seg
