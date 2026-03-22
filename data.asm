@@ -43,13 +43,21 @@
 .define INIDISP_ON       $0F
 
 ;; Tile data constants
-.define VIEW_COLS        32        ; viewport tile columns (256 pixels, full width)
-.define VIEW_ROWS        15        ; viewport tile rows (120 pixels, max for 32KB)
-.define NUM_TILES        480       ; 32x15 tiles
-.define PAD_TILE         480       ; black padding tile index (all zeros)
+.define VIEW_COLS        27        ; viewport tile columns (216 pixels, matching Doom)
+.define VIEW_ROWS        18        ; viewport tile rows (144 pixels, matching Doom)
+.define NUM_TILES        486       ; 27x18 viewport tiles
 .define TILE_BYTES       64        ; 8bpp tile = 64 bytes
-.define TILE_DATA_SIZE   30784     ; (480+1) * 64 = 30784 bytes (includes padding tile)
-.define TILE_DATA_WORDS  15392     ; 30784 / 2
+.define TILE_DATA_SIZE   31104     ; 486 * 64 bytes (GSU framebuffer, DMA'd each frame)
+.define TILE_DATA_WORDS  15552     ; 31104 / 2
+; Border tiles (static, written to VRAM during init, not DMA'd)
+.define BORDER_CEIL      486       ; ceiling blue tile
+.define BORDER_FLOOR     487       ; floor green tile
+.define BORDER_BLACK     488       ; black tile
+.define BORDER_WALL      489       ; wall brown tile
+; Viewport centering: 3 cols left + 27 viewport + 2 cols right = 32
+; 5 rows top + 18 viewport + 5 rows bottom = 28
+.define VP_LEFT          3         ; viewport starts at tile column 3
+.define VP_TOP           5         ; viewport starts at tile row 5
 
 ;; -------------------------------------------------------
 ;; IRQTrampoline -- ROM entry point for IRQ vector
@@ -322,35 +330,73 @@ initMode3Display:
     sta.l $2116          ; VMADDL/VMADDH = $4000
     sep #$20
 
-    ; === Write 32x32 tilemap: sequential 0-895, then pad 896-1023 ===
+    ; === Write 32x32 tilemap: centered 27x18 viewport with colored borders ===
+    ; Viewport at cols 3-29, rows 5-22. Borders: blue top, green bottom, black sides
     rep #$20
     lda #$7000
     sta.l $2116          ; VRAM address = tilemap base
-    ; 896 sequential tiles (32×28 = full screen)
-    ldx #$0000
-@TM_View:
+    ldx #$0000           ; X = viewport tile index (0-485)
+    ldy #$0000           ; Y = row counter
+    stz.b $00            ; column = 0
+@TM_Entry:
+    ; Top border (rows 0-4)?
+    cpy #VP_TOP
+    bcs @TM_NotTop
+    lda #BORDER_CEIL
+    sta.l $2118
+    bra @TM_Advance
+@TM_NotTop:
+    ; Bottom border (rows 23-27)?
+    cpy #VP_TOP + VIEW_ROWS  ; row >= 23?
+    bcs @TM_Bottom
+    ; In viewport row range. Check column.
+    lda.b $00
+    cmp #VP_LEFT         ; col < 3? left border
+    bcc @TM_Side
+    cmp #VP_LEFT + VIEW_COLS  ; col >= 30? right border
+    bcs @TM_Side
+    ; Viewport tile
     txa
     sta.l $2118
     inx
-    cpx #$0380           ; 896
-    bne @TM_View
-    ; 128 padding entries (tile 0, for the extra 4 tilemap rows)
-    lda #$0000
-    ldx #$0080           ; 128
-@TM_Pad:
+    bra @TM_Advance
+@TM_Side:
+    ; Match the 3 viewport bands: ceil (rows 5-10), wall (11-16), floor (17-22)
+    cpy #VP_TOP + VIEW_ROWS / 3  ; row >= 11? (past ceiling band)
+    bcs @TM_SideNotCeil
+    lda #BORDER_CEIL
     sta.l $2118
-    dex
-    bne @TM_Pad
+    bra @TM_Advance
+@TM_SideNotCeil:
+    cpy #VP_TOP + VIEW_ROWS * 2 / 3  ; row >= 17? (past wall band)
+    bcs @TM_SideFloor
+    lda #BORDER_WALL
+    sta.l $2118
+    bra @TM_Advance
+@TM_SideFloor:
+    lda #BORDER_FLOOR
+    sta.l $2118
+    bra @TM_Advance
+@TM_Bottom:
+    lda #BORDER_FLOOR
+    sta.l $2118
+@TM_Advance:
+    lda.b $00
+    inc a
+    cmp #$0020           ; 32 columns?
+    bne @TM_Store
+    lda #$0000           ; reset column
+    iny                  ; next row
+@TM_Store:
+    sta.b $00
+    cpy #$0020           ; 32 rows done?
+    bne @TM_Entry
     sep #$20
 
     ; === Clear tile character data at VRAM $0000 ===
-    ; === Write 3-band tile data to VRAM (full screen: 32x28 = 896 tiles) ===
-    ; Band 1 (rows 0-8, 288 tiles): color 16 = BP4 set
-    ; Band 2 (rows 9-18, 320 tiles): color 1 = BP0 set
-    ; Band 3 (rows 19-27, 288 tiles): color 17 = BP0+BP4 set
-    ; Each tile = 64 bytes. For uniform color:
-    ;   BP group with bit set: 8 rows of ($FF, $00) = 16 bytes
-    ;   BP group without: 8 rows of ($00, $00) = 16 bytes
+    ; === Write tile data: 486 viewport tiles + 3 border tiles ===
+    ; Viewport: 3 bands of 6 rows (162 tiles each)
+    ; Border tiles: 486=ceil blue, 487=floor green, 488=black
     lda #$80
     sta.l $2115          ; VMAIN: word increment
     rep #$20
@@ -358,12 +404,10 @@ initMode3Display:
     sta.l $2116          ; VRAM addr = $0000
     sep #$20
 
-    ; --- Band 1: 288 tiles, color 16 (00010000) ---
-    ; BP0/1=$00/$00, BP2/3=$00/$00, BP4/5=$FF/$00, BP6/7=$00/$00
+    ; --- Band 1: 162 tiles, color 16 (BP4=$FF) ---
     rep #$10
-    ldx #$0000           ; tile counter
+    ldx #$0000
 @B1_Tile:
-    ; BP0/1 group (16 bytes of $00)
     ldy #$0008
 @B1_01:
     lda #$00
@@ -371,7 +415,6 @@ initMode3Display:
     sta.l $2119
     dey
     bne @B1_01
-    ; BP2/3 group (16 bytes of $00)
     ldy #$0008
 @B1_23:
     lda #$00
@@ -379,7 +422,6 @@ initMode3Display:
     sta.l $2119
     dey
     bne @B1_23
-    ; BP4/5 group ($FF, $00 × 8)
     ldy #$0008
 @B1_45:
     lda #$FF
@@ -388,7 +430,6 @@ initMode3Display:
     sta.l $2119
     dey
     bne @B1_45
-    ; BP6/7 group (16 bytes of $00)
     ldy #$0008
 @B1_67:
     lda #$00
@@ -397,13 +438,11 @@ initMode3Display:
     dey
     bne @B1_67
     inx
-    cpx #$0120           ; 288 tiles
+    cpx #$00A2           ; 162
     bne @B1_Tile
 
-    ; --- Band 2: 320 tiles, color 1 (00000001) ---
-    ; BP0/1=$FF/$00, rest $00
+    ; --- Band 2: 162 tiles, color 1 (BP0=$FF) ---
 @B2_Tile:
-    ; BP0/1 group ($FF, $00 × 8)
     ldy #$0008
 @B2_01:
     lda #$FF
@@ -412,8 +451,7 @@ initMode3Display:
     sta.l $2119
     dey
     bne @B2_01
-    ; BP2-7 (48 bytes of $00)
-    ldy #$0018           ; 24 words = 48 bytes
+    ldy #$0018
 @B2_rest:
     lda #$00
     sta.l $2118
@@ -421,13 +459,11 @@ initMode3Display:
     dey
     bne @B2_rest
     inx
-    cpx #$0120 + $0140   ; 288 + 320 = 608
+    cpx #$0144           ; 324
     bne @B2_Tile
 
-    ; --- Band 3: 288 tiles, color 17 (00010001) ---
-    ; BP0/1=$FF/$00, BP2/3=$00, BP4/5=$FF/$00, BP6/7=$00
+    ; --- Band 3: 162 tiles, color 17 (BP0+BP4=$FF) ---
 @B3_Tile:
-    ; BP0/1 ($FF, $00 × 8)
     ldy #$0008
 @B3_01:
     lda #$FF
@@ -436,7 +472,6 @@ initMode3Display:
     sta.l $2119
     dey
     bne @B3_01
-    ; BP2/3 ($00 × 16)
     ldy #$0008
 @B3_23:
     lda #$00
@@ -444,7 +479,6 @@ initMode3Display:
     sta.l $2119
     dey
     bne @B3_23
-    ; BP4/5 ($FF, $00 × 8)
     ldy #$0008
 @B3_45:
     lda #$FF
@@ -453,7 +487,6 @@ initMode3Display:
     sta.l $2119
     dey
     bne @B3_45
-    ; BP6/7 ($00 × 16)
     ldy #$0008
 @B3_67:
     lda #$00
@@ -462,8 +495,98 @@ initMode3Display:
     dey
     bne @B3_67
     inx
-    cpx #$0380           ; 896 total tiles
+    cpx #$01E6           ; 486
     bne @B3_Tile
+
+    ; --- Tile 486: ceiling blue (color 16, BP4=$FF) ---
+    ; VRAM continues sequentially after tile 485
+    ldy #$0008
+@BC_01:
+    lda #$00
+    sta.l $2118
+    sta.l $2119
+    dey
+    bne @BC_01
+    ldy #$0008
+@BC_23:
+    lda #$00
+    sta.l $2118
+    sta.l $2119
+    dey
+    bne @BC_23
+    ldy #$0008
+@BC_45:
+    lda #$FF
+    sta.l $2118
+    lda #$00
+    sta.l $2119
+    dey
+    bne @BC_45
+    ldy #$0008
+@BC_67:
+    lda #$00
+    sta.l $2118
+    sta.l $2119
+    dey
+    bne @BC_67
+
+    ; --- Tile 487: floor green (color 17, BP0+BP4=$FF) ---
+    ldy #$0008
+@BF_01:
+    lda #$FF
+    sta.l $2118
+    lda #$00
+    sta.l $2119
+    dey
+    bne @BF_01
+    ldy #$0008
+@BF_23:
+    lda #$00
+    sta.l $2118
+    sta.l $2119
+    dey
+    bne @BF_23
+    ldy #$0008
+@BF_45:
+    lda #$FF
+    sta.l $2118
+    lda #$00
+    sta.l $2119
+    dey
+    bne @BF_45
+    ldy #$0008
+@BF_67:
+    lda #$00
+    sta.l $2118
+    sta.l $2119
+    dey
+    bne @BF_67
+
+    ; --- Tile 488: black (all $00) ---
+    ldy #$0020
+@BK:
+    lda #$00
+    sta.l $2118
+    sta.l $2119
+    dey
+    bne @BK
+
+    ; --- Tile 489: wall brown (color 1, BP0=$FF) ---
+    ldy #$0008
+@BW_01:
+    lda #$FF
+    sta.l $2118
+    lda #$00
+    sta.l $2119
+    dey
+    bne @BW_01
+    ldy #$0018
+@BW_rest:
+    lda #$00
+    sta.l $2118
+    sta.l $2119
+    dey
+    bne @BW_rest
 
     ; Screen on (will be controlled by IRQ after setupIRQ)
     lda #INIDISP_ON
