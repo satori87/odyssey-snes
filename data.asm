@@ -43,10 +43,10 @@
 .define INIDISP_ON       $0F
 
 ;; Tile data constants
-.define NUM_TILES        240       ; 20x12 tiles
+.define NUM_TILES        384       ; 32x12 tiles (includes 12 padding cols)
 .define TILE_BYTES       64        ; 8bpp tile = 64 bytes
-.define TILE_DATA_SIZE   15360     ; 240 * 64 = 15360 bytes
-.define TILE_DATA_WORDS  7680      ; 15360 / 2
+.define TILE_DATA_SIZE   24576     ; 384 * 64 = 24576 bytes
+.define TILE_DATA_WORDS  12288     ; 24576 / 2
 
 ;; -------------------------------------------------------
 ;; IRQTrampoline -- ROM entry point for IRQ vector
@@ -319,31 +319,27 @@ initMode3Display:
     sta.l $2116          ; VMADDL/VMADDH = $4000
     sep #$20
 
-    ; === Step 1: Clear entire 32x32 tilemap to tile 0 ===
-    rep #$20
-    ldx #$0400           ; 1024 entries
-@TM_Clear:
-    lda #$0000
-    sta.l $2118          ; write tile 0
-    dex
-    bne @TM_Clear
-    sep #$20
-
-    ; === Step 2: Overwrite row 0 viewport tiles (0-19) ===
-    ; Re-set VRAM address to tilemap base
+    ; === Write tilemap: 240 sequential entries then 784 zeros ===
+    ; Simple sequential layout (entry N = tile N for first 240)
+    ; This ignores 32-wide tilemap rows for now — just proves entries work
     rep #$20
     lda #$4000
-    sta.l $2116
-    ; Write tile indices 0-19 for viewport row 0
+    sta.l $2116          ; VRAM address = tilemap base
     ldx #$0000
-@TM_ViewRow0:
-    rep #$20
+@TM_Seq:
     txa
-    sta.l $2118
-    sep #$20
+    sta.l $2118          ; write tile index = X
     inx
-    cpx #$0014           ; 20 tiles
-    bne @TM_ViewRow0
+    cpx #$00F0           ; 240 entries
+    bne @TM_Seq
+    ; Fill remaining 784 entries with tile 0
+    lda #$0000
+    ldx #$0310           ; 784
+@TM_Pad:
+    sta.l $2118
+    dex
+    bne @TM_Pad
+    sep #$20
 
     ; === Clear tile character data at VRAM $0000 ===
     ; 240 tiles * 32 words each = 7680 words
