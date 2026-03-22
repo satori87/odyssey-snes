@@ -1,7 +1,22 @@
-; GSU DDA Raycaster — stb-based bitplane renderer (Doom resolution 216x144)
+; =====================================================================
+; GSU DDA Raycaster — SuperFX raycasting + row-by-row plot renderer
 ;
-; Phase 1: Cast 27 rays via DDA, compute drawStart/drawEnd/wallColor
-; Phase 2: Row-by-row tile rendering using stb (no plot instruction)
+; Phase 1: Cast 20 rays via DDA, compute drawStart/drawEnd/wallColor
+; Phase 2: Row-by-row pixel rendering using plot (160x96, Mode 3 8bpp)
+;
+; SuperFX RAM bank $70 layout:
+;   $0000: posX    (s16 8.8, written by 65816)
+;   $0002: posY    (s16 8.8)
+;   $0004: dirX    (s16 8.8)
+;   $0006: dirY    (s16 8.8)
+;   $0008: planeX  (s16 8.8)
+;   $000A: planeY  (s16 8.8)
+;   $0040: drawStart[20] (u8 per column)
+;   $0060: drawEnd[20]   (u8 per column)
+;   $0080: wallColor[20] (u8 per column)
+;   $00A0: scratch workspace
+;   $0400: framebuffer (tile pixel data)
+; =====================================================================
 
 .MEMORYMAP
   SLOTSIZE $8000
@@ -15,15 +30,14 @@
 .ROMBANKSIZE $8000
 .ROMBANKS 8
 
-.define SCREEN_H     144
-.define HALF_H       72
-.define NUM_COLS     27
-.define NUM_TROWS    18
+; --- Constants ---
+.define SCREEN_H     96
+.define HALF_H       48
+.define NUM_COLS     20
 .define MAP_W        10
 .define MAP_H        10
-.define FB_BASE      $0400
-.define TILE_SIZE    64
 
+; --- RAM addresses ---
 .define RAM_POSX      $0000
 .define RAM_POSY      $0002
 .define RAM_DIRX      $0004
@@ -33,6 +47,8 @@
 .define RAM_DRAWSTART $0040
 .define RAM_DRAWEND   $0060
 .define RAM_WALLCOLOR $0080
+
+; Scratch area ($00A0-$00BF)
 .define RAM_RAYDIRX    $00A0
 .define RAM_RAYDIRY    $00A2
 .define RAM_DELTADX    $00A4
@@ -49,21 +65,49 @@
 .define RAM_FRACX      $00BA
 .define RAM_FRACY      $00BC
 .define RAM_SCRATCH    $00BE
-.define RAM_CEIL_BP   $00C0
-.define RAM_WALL_BP   $00C8
-.define RAM_FLOOR_BP  $00D0
-.define RAM_TROW_Y    $00D8
 
+
+; =====================================================================
 .BANK 0
 .SECTION "GSUCode" SUPERFREE
 
+; =====================================================================
+; Entry point — called by 65816 via startGSU
+; =====================================================================
 gsu_fill_screen:
     iwt r0, #$70
-    ramb
-    ibt r0, #0
-    romb
+    ramb                    ; RAM bank = $70
 
-    ; ===== PHASE 1: DDA Raycasting (27 columns) =====
+    ; ===== SIMPLE SOLID FILL (matching working commit bb14381) =====
+    ibt r14, #5
+    color
+
+    ibt r2, #0
+_sfill_row:
+    ibt r1, #0
+_sfill_col:
+    plot
+    nop
+    iwt r3, #160
+    from r1
+    cmp r3
+    blt _sfill_col
+    nop
+    inc r2
+    iwt r3, #96
+    from r2
+    cmp r3
+    blt _sfill_row
+    nop
+
+    stop
+    nop
+
+    ; ===== DEAD CODE BELOW (full raycaster, currently bypassed) =====
+    ibt r0, #0
+    romb                    ; ROM bank = 0
+
+    ; ===== PHASE 1: DDA Raycasting (20 columns) =====
     ibt r0, #0
     sm (RAM_COL), r0
 
@@ -81,71 +125,102 @@ _phase1_loop:
     sm (RAM_SCRATCH), r0    ; save cameraX for rayDirY calc
 
     ; --- rayDirX = dirX + fp_mul(planeX, cameraX) ---
-    ; Simplified fp_mul: only al*bh + (al*bl)>>8 (planeX < 256 so ah=0)
-    lm r1, (RAM_PLANEX)     ; r1 = planeX
-    move r3, r0             ; r3 = cameraX
-
+    lm r1, (RAM_PLANEX)    ; r1 = planeX
+    ; r0 = cameraX
+    ; Need r0 in r3 for fp_mul(r1, r3)
+    to r3
+    move r3, r0
+    ; Inline fp_mul: result -> r10
+    ; Make both positive, track sign in r5
     ibt r5, #0
-    moves r0, r1
+    moves r0, r1            ; test r1 sign
     bpl _fp1_apos
     nop
     with r1
     not
-    inc r1
+    inc r1                  ; r1 = |planeX|
     ibt r5, #1
 _fp1_apos:
-    moves r0, r3
+    moves r0, r3            ; test r3 sign
     bpl _fp1_bpos
     nop
     with r3
     not
-    inc r3
+    inc r3                  ; r3 = |cameraX|
+    ; flip sign: r5 = 1 - r5
     ibt r0, #1
     from r0
     to r5
-    sub r5                  ; r5 = 1 - r5
+    sub r5
 _fp1_bpos:
+    ; r1 = |a|, r3 = |b|, r5 = neg flag
+    ; Decompose: ah=r1>>8, al=r1&FF, bh=r3>>8, bl=r3&FF
     from r1
-    lob
-    move r6, r0             ; r6 = al = |planeX| & FF
+    hib                     ; r0 = ah
+    to r7
+    move r7, r0
+    from r1
+    lob                     ; r0 = al
+    to r6
+    move r6, r0
     from r3
-    hib
-    move r7, r0             ; r7 = bh = |cameraX| >> 8
+    hib                     ; r0 = bh
+    to r8
+    move r8, r0
     from r3
-    lob
-    move r8, r0             ; r8 = bl = |cameraX| & FF
+    lob                     ; r0 = bl
+    to r11
+    move r11, r0
 
-    ; result = al*bh + (al*bl)>>8
+    ; (ah * bh) << 8
+    move r0, r7
+    umult r8                ; r0 = ah * bh
+    swap                    ; r0 <<= 8 (swap hi/lo bytes)
+    to r10
+    move r10, r0
+
+    ; ah * bl
+    move r0, r7
+    umult r11               ; r0 = ah * bl
+    with r10
+    add r0
+
+    ; al * bh
     move r0, r6
-    umult r7
-    move r10, r0            ; r10 = al * bh
+    umult r8                ; r0 = al * bh
+    with r10
+    add r0
+
+    ; (al * bl) >> 8
     move r0, r6
-    umult r8
+    umult r11               ; r0 = al * bl
     swap
     lob                     ; r0 = (al*bl) >> 8
     with r10
-    add r0                  ; r10 = al*bh + (al*bl)>>8
+    add r0
 
     ; Apply sign
     ibt r0, #0
     from r5
-    cmp r0
+    cmp r0                  ; r5 == 0?
     beq _fp1_done
     nop
     from r10
     not
     inc r0
+    to r10
     move r10, r0
 _fp1_done:
+    ; r10 = fp_mul(planeX, cameraX)
     lm r1, (RAM_DIRX)
-    move r0, r10
-    with r0
-    add r1                  ; r0 = dirX + fp_mul_result
+    from r10
+    to r0
+    add r1                  ; r0 = dirX + result = rayDirX
     sm (RAM_RAYDIRX), r0
 
     ; --- rayDirY = dirY + fp_mul(planeY, cameraX) ---
     lm r1, (RAM_PLANEY)
-    lm r3, (RAM_SCRATCH)
+    lm r3, (RAM_SCRATCH)   ; r3 = cameraX
 
     ibt r5, #0
     moves r0, r1
@@ -168,20 +243,37 @@ _fp2_apos:
     sub r5
 _fp2_bpos:
     from r1
+    hib
+    to r7
+    move r7, r0
+    from r1
     lob
+    to r6
     move r6, r0
     from r3
     hib
-    move r7, r0
+    to r8
+    move r8, r0
     from r3
     lob
-    move r8, r0
+    to r11
+    move r11, r0
 
-    move r0, r6
-    umult r7
+    move r0, r7
+    umult r8
+    swap
+    to r10
     move r10, r0
+    move r0, r7
+    umult r11
+    with r10
+    add r0
     move r0, r6
     umult r8
+    with r10
+    add r0
+    move r0, r6
+    umult r11
     swap
     lob
     with r10
@@ -195,11 +287,12 @@ _fp2_bpos:
     from r10
     not
     inc r0
+    to r10
     move r10, r0
 _fp2_done:
     lm r1, (RAM_DIRY)
-    move r0, r10
-    with r0
+    from r10
+    to r0
     add r1
     sm (RAM_RAYDIRY), r0
 
@@ -591,50 +684,66 @@ _perp_pos:
 _perp_nz:
     sm (RAM_PERPDIST), r0
 
-    ; --- Height from perpDist (direct, no table) ---
-    ; halfHeight = 72 - (perpDist >> 5), clamped to 0-72
+    ; --- Height lookup ---
+    ; Index = perpDist >> 4 (covers 0 to ~15.9 tiles distance)
     lm r0, (RAM_PERPDIST)
     lsr
     lsr
     lsr
-    lsr
-    lsr                      ; r0 = perpDist >> 5
-    move r8, r0              ; r8 = perpDist >> 5
-    ibt r0, #72
-    with r0
-    sub r8                   ; r0 = 72 - (perpDist >> 5)
-    moves r0, r0
-    bpl _ht_pos
+    lsr                      ; r0 = perpDist >> 4
+    ; Clamp to 1-255
+    ibt r1, #0
+    from r0
+    cmp r1
+    bne _ht_nz
     nop
-    ibt r0, #0               ; clamp to 0
-_ht_pos:
+    ibt r0, #1               ; zero -> 1 (very close wall)
+_ht_nz:
+    iwt r1, #256
+    from r0
+    cmp r1
+    blt _ht_ok
+    nop
+    ibt r0, #255
+    lob                      ; clamp to 255
+_ht_ok:
+    ; height_tbl is byte-indexed (1 byte per entry)
+    iwt r1, #(height_tbl - $8000)
+    to r14
+    add r1
+    getb                     ; r0 = wall height (0-96)
+
+    ; --- drawStart, drawEnd ---
+    to r7
+    move r7, r0              ; r7 = height
+    from r7
+    lsr                      ; r0 = height / 2
+    to r8
     move r8, r0              ; r8 = halfHeight
 
-    ; drawStart = 72 - halfHeight
-    ibt r0, #72
+    ; drawStart = HALF_H - halfHeight, clamped to >= 0
+    ibt r0, #HALF_H
     from r0
     to r3
-    sub r8                   ; r3 = drawStart
-    moves r0, r3
+    sub r8                   ; r3 = 48 - halfHeight
+    moves r0, r3             ; test sign
     bpl _ds_ok
     nop
     ibt r3, #0
 _ds_ok:
 
-    ; drawEnd = 72 + halfHeight - 1
-    ibt r0, #72
+    ; drawEnd = HALF_H + halfHeight - 1, clamped to <= 95
+    ibt r0, #HALF_H
     from r0
     to r4
-    add r8                   ; r4 = 72 + halfHeight
-    ibt r0, #1
-    with r4
-    sub r0                   ; r4 -= 1
-    iwt r0, #143
+    add r8                   ; r4 = 48 + halfHeight
+    dec r4                   ; r4 = 48 + halfHeight - 1
+    ibt r0, #95
     from r4
     cmp r0
     blt _de_ok
     nop
-    iwt r4, #143
+    ibt r4, #95
 _de_ok:
 
     ; --- Store to RAM arrays ---
@@ -658,12 +767,11 @@ _de_ok:
     move r0, r6              ; r0 = wallColor
     stb (r5)                 ; wallColor[col] = r0.lo
 
-
     ; --- Next column ---
     lm r0, (RAM_COL)
     inc r0
     sm (RAM_COL), r0
-    ibt r1, #27
+    ibt r1, #NUM_COLS
     from r0
     cmp r1
     blt _p1_cont
@@ -675,411 +783,69 @@ _de_ok:
 _p1_cont:
     iwt r15, #(_phase1_loop - $8000)
     nop
+
+
+    ; ===================================================================
+    ; PHASE 2: ROW-BY-ROW RENDERING
+    ;
+    ; For each row Y (0-95):
+    ;   Set R2 = Y, R1 = 0
+    ;   For each column (0-19):
+    ;     Determine color from drawStart/drawEnd/wallColor
+    ;     Set color, plot 8 pixels
+    ; ===================================================================
 _phase2:
-    nop
+    ; === MINIMAL SOLID FILL TEST ===
+    ; Fill entire 160x96 viewport with color 1 (brown)
+    ; No column data, no decisions — just verify plot works
+    ibt r14, #1              ; color index 1
+    color
 
-    ; ===== Precompute BP bytes for ceiling (16) and floor (17) =====
-    ; Color 16 = 00010000: BP4=$FF, rest $00
-    iwt r1, #RAM_CEIL_BP
-    ibt r0, #0
-    stb (r1)                ; BP0
-    inc r1
-    stb (r1)                ; BP1
-    inc r1
-    stb (r1)                ; BP2
-    inc r1
-    stb (r1)                ; BP3
-    inc r1
-    ibt r0, #$FF
-    lob
-    stb (r1)                ; BP4=$FF
-    inc r1
-    ibt r0, #0
-    stb (r1)                ; BP5
-    inc r1
-    stb (r1)                ; BP6
-    inc r1
-    stb (r1)                ; BP7
+    ibt r9, #0               ; r9 = row counter
 
-    ; Color 17 = 00010001: BP0=$FF, BP4=$FF, rest $00
-    iwt r1, #RAM_FLOOR_BP
-    ibt r0, #$FF
-    lob
-    stb (r1)                ; BP0=$FF
-    inc r1
-    ibt r0, #0
-    stb (r1)                ; BP1
-    inc r1
-    stb (r1)                ; BP2
-    inc r1
-    stb (r1)                ; BP3
-    inc r1
-    ibt r0, #$FF
-    lob
-    stb (r1)                ; BP4=$FF
-    inc r1
-    ibt r0, #0
-    stb (r1)                ; BP5
-    inc r1
-    stb (r1)                ; BP6
-    inc r1
-    stb (r1)                ; BP7
-
-    ; ===== PHASE 2: Row-by-row tile rendering =====
-    ; Process tiles sequentially (row 0 cols 0-26, row 1 cols 0-26, ...)
-    ; For each tile: determine color, write 64 bytes of bitplane data
-
-    iwt r1, #FB_BASE        ; r1 = tile write address (auto-advancing)
-    ibt r3, #0              ; r3 = tile_row (0-17)
-    ibt r0, #0
-    sm (RAM_TROW_Y), r0     ; pixel_y of row start = 0
-
-_trow_loop:
-    ibt r2, #0              ; r2 = column (0-26)
+_row_loop:
+    move r2, r9              ; R2 = Y for plot
+    ibt r1, #0               ; R1 = X = 0
+    ibt r8, #0               ; r8 = column counter
 
 _col_loop:
-    ; Load drawStart[col] and drawEnd[col]
-    iwt r0, #RAM_DRAWSTART
-    to r4
-    add r2
-    ldb (r4)                ; r0 = drawStart[col]
-    move r4, r0             ; r4 = drawStart
+    ; (color already set, just plot)
 
-    iwt r0, #RAM_DRAWEND
-    to r5
-    add r2
-    ldb (r5)                ; r0 = drawEnd[col]
-    move r5, r0             ; r5 = drawEnd
-
-    ; Load wallColor[col]
-    iwt r0, #RAM_WALLCOLOR
-    to r6
-    add r2
-    ldb (r6)                ; r0 = wallColor[col]
-    move r6, r0             ; r6 = wallColor
-
-    ; Precompute wall BP bytes (color varies per column)
-    ; Color r6: for each bit N, BP[N] = $FF if set, $00 if clear
-    iwt r7, #RAM_WALL_BP
-    ; BP0 = bit 0
-    from r6
-    lob
-    ibt r8, #1
-    AND r8                  ; r0 = color & 1
-    ibt r8, #0
-    from r8
-    to r0
-    sub r0                  ; r0 = 0 - (color&1) = $0000 or $FFFF
-    lob                     ; r0 = $00 or $FF
-    stb (r7)
-    inc r7
-    ; BP1 = bit 1
-    from r6
-    lob
-    lsr                     ; r0 = color >> 1
-    ibt r8, #1
-    AND r8
-    ibt r8, #0
-    from r8
-    to r0
-    sub r0
-    lob
-    stb (r7)
-    inc r7
-    ; BP2 = bit 2
-    from r6
-    lob
-    lsr
-    lsr
-    ibt r8, #1
-    AND r8
-    ibt r8, #0
-    from r8
-    to r0
-    sub r0
-    lob
-    stb (r7)
-    inc r7
-    ; BP3 = bit 3
-    from r6
-    lob
-    lsr
-    lsr
-    lsr
-    ibt r8, #1
-    AND r8
-    ibt r8, #0
-    from r8
-    to r0
-    sub r0
-    lob
-    stb (r7)
-    inc r7
-    ; BP4 = bit 4
-    from r6
-    hib                     ; r0 = color >> 8... no, hib gives high byte
-    ; Actually for 8-bit color, bits 4-7 need: color >> 4
-    from r6
-    lob
-    lsr
-    lsr
-    lsr
-    lsr                     ; r0 = color >> 4
-    ibt r8, #1
-    AND r8
-    ibt r8, #0
-    from r8
-    to r0
-    sub r0
-    lob
-    stb (r7)
-    inc r7
-    ; BP5 = bit 5
-    from r6
-    lob
-    lsr
-    lsr
-    lsr
-    lsr
-    lsr
-    ibt r8, #1
-    AND r8
-    ibt r8, #0
-    from r8
-    to r0
-    sub r0
-    lob
-    stb (r7)
-    inc r7
-    ; BP6-7 = 0 for colors 0-31
-    ibt r0, #0
-    stb (r7)
-    inc r7
-    stb (r7)
-
-    ; --- Per-row tile rendering (pixel-accurate boundaries) ---
-    ; Precompute 8 row color types at $00E0-$00E7
-    ; 0=ceiling, 1=wall, 2=floor
-    lm r7, (RAM_TROW_Y)    ; pixel_y_start for this tile row
-    iwt r10, #$00E0
-    ibt r11, #8
-_pc_loop:
-    from r7
-    cmp r4                  ; pixel_y - drawStart
-    bge _pc_nc
+    ; Plot 8 pixels (R1 auto-increments after each plot)
+    plot
     nop
-    ibt r0, #0              ; ceiling
-    bra _pc_store
+    plot
     nop
-_pc_nc:
-    from r5
-    cmp r7                  ; drawEnd - pixel_y
-    bge _pc_w
+    plot
     nop
-    ibt r0, #2              ; floor
-    bra _pc_store
+    plot
     nop
-_pc_w:
-    ibt r0, #1              ; wall
-_pc_store:
-    stb (r10)
-    inc r10
-    inc r7
-    ibt r0, #1
-    with r11
-    sub r0
-    ibt r0, #0
-    from r11
-    cmp r0
-    bne _pc_loop
+    plot
+    nop
+    plot
+    nop
+    plot
+    nop
+    plot
     nop
 
-    ; Write 4 BP groups using precomputed color types
-    ; Group 0 (BP0, BP1)
-    iwt r10, #$00E0
-    ibt r11, #8
-_wt_g0:
-    ldb (r10)               ; r0 = color type
-    ibt r8, #1
-    from r0
-    cmp r8
-    blt _wt_g0_c
-    nop
-    beq _wt_g0_w
-    nop
-    iwt r9, #RAM_FLOOR_BP
-    bra _wt_g0_s
-    nop
-_wt_g0_c:
-    iwt r9, #RAM_CEIL_BP
-    bra _wt_g0_s
-    nop
-_wt_g0_w:
-    iwt r9, #RAM_WALL_BP
-_wt_g0_s:
-    ldb (r9)
-    stb (r1)
-    inc r1
-    inc r9
-    ldb (r9)
-    stb (r1)
-    inc r1
-    inc r10
-    ibt r0, #1
-    with r11
-    sub r0
-    ibt r0, #0
-    from r11
-    cmp r0
-    bne _wt_g0
-    nop
-
-    ; Group 1 (BP2, BP3)
-    iwt r10, #$00E0
-    ibt r11, #8
-_wt_g1:
-    ldb (r10)
-    ibt r8, #1
-    from r0
-    cmp r8
-    blt _wt_g1_c
-    nop
-    beq _wt_g1_w
-    nop
-    iwt r9, #RAM_FLOOR_BP + 2
-    bra _wt_g1_s
-    nop
-_wt_g1_c:
-    iwt r9, #RAM_CEIL_BP + 2
-    bra _wt_g1_s
-    nop
-_wt_g1_w:
-    iwt r9, #RAM_WALL_BP + 2
-_wt_g1_s:
-    ldb (r9)
-    stb (r1)
-    inc r1
-    inc r9
-    ldb (r9)
-    stb (r1)
-    inc r1
-    inc r10
-    ibt r0, #1
-    with r11
-    sub r0
-    ibt r0, #0
-    from r11
-    cmp r0
-    bne _wt_g1
-    nop
-
-    ; Group 2 (BP4, BP5)
-    iwt r10, #$00E0
-    ibt r11, #8
-_wt_g2:
-    ldb (r10)
-    ibt r8, #1
-    from r0
-    cmp r8
-    blt _wt_g2_c
-    nop
-    beq _wt_g2_w
-    nop
-    iwt r9, #RAM_FLOOR_BP + 4
-    bra _wt_g2_s
-    nop
-_wt_g2_c:
-    iwt r9, #RAM_CEIL_BP + 4
-    bra _wt_g2_s
-    nop
-_wt_g2_w:
-    iwt r9, #RAM_WALL_BP + 4
-_wt_g2_s:
-    ldb (r9)
-    stb (r1)
-    inc r1
-    inc r9
-    ldb (r9)
-    stb (r1)
-    inc r1
-    inc r10
-    ibt r0, #1
-    with r11
-    sub r0
-    ibt r0, #0
-    from r11
-    cmp r0
-    bne _wt_g2
-    nop
-
-    ; Group 3 (BP6, BP7)
-    iwt r10, #$00E0
-    ibt r11, #8
-_wt_g3:
-    ldb (r10)
-    ibt r8, #1
-    from r0
-    cmp r8
-    blt _wt_g3_c
-    nop
-    beq _wt_g3_w
-    nop
-    iwt r9, #RAM_FLOOR_BP + 6
-    bra _wt_g3_s
-    nop
-_wt_g3_c:
-    iwt r9, #RAM_CEIL_BP + 6
-    bra _wt_g3_s
-    nop
-_wt_g3_w:
-    iwt r9, #RAM_WALL_BP + 6
-_wt_g3_s:
-    ldb (r9)
-    stb (r1)
-    inc r1
-    inc r9
-    ldb (r9)
-    stb (r1)
-    inc r1
-    inc r10
-    ibt r0, #1
-    with r11
-    sub r0
-    ibt r0, #0
-    from r11
-    cmp r0
-    bne _wt_g3
-    nop
-    ; Next column (long branch — _col_loop is >128 bytes away)
-    inc r2
+    ; Next column
+    inc r8
     ibt r0, #NUM_COLS
-    from r2
+    from r8
     cmp r0
-    bge _col_done
+    blt _col_loop
     nop
-    iwt r15, #(_col_loop - $8000)
-    nop
-_col_done:
 
-    ; Next tile row (long branch — _trow_loop is >128 bytes away)
-    inc r3
-    ; Advance pixel_y_start by 8
-    lm r0, (RAM_TROW_Y)
-    ibt r2, #8
-    from r0
-    to r0
-    add r2
-    sm (RAM_TROW_Y), r0
-    ; Check if done
-    ibt r0, #NUM_TROWS
-    from r3
+    ; Next row
+    inc r9
+    ibt r0, #SCREEN_H
+    from r9
     cmp r0
-    bge _trow_done
+    blt _row_loop
     nop
-    iwt r15, #(_trow_loop - $8000)
-    nop
-_trow_done:
 
+    ; Done
     stop
     nop
 
@@ -1088,37 +854,32 @@ _trow_done:
 ; ROM DATA TABLES
 ; =====================================================================
 
-; --- cameraX_tbl: 27 entries (s16 8.8) ---
+; --- cameraX_tbl: 20 entries (s16 8.8) ---
+; cameraX[col] = (2*col/20 - 1) * 256
 cameraX_tbl:
-    .dw   -256   ; col 0
-    .dw   -237   ; col 1
-    .dw   -218   ; col 2
-    .dw   -199   ; col 3
-    .dw   -180   ; col 4
-    .dw   -161   ; col 5
-    .dw   -142   ; col 6
-    .dw   -123   ; col 7
-    .dw   -104   ; col 8
-    .dw    -85   ; col 9
-    .dw    -66   ; col 10
-    .dw    -47   ; col 11
-    .dw    -28   ; col 12
-    .dw     -9   ; col 13
-    .dw      9   ; col 14
-    .dw     28   ; col 15
-    .dw     47   ; col 16
-    .dw     66   ; col 17
-    .dw     85   ; col 18
-    .dw    104   ; col 19
-    .dw    123   ; col 20
-    .dw    142   ; col 21
-    .dw    161   ; col 22
-    .dw    180   ; col 23
-    .dw    199   ; col 24
-    .dw    218   ; col 25
-    .dw    237   ; col 26
+    .dw -256   ; col 0:  -1.000
+    .dw -230   ; col 1:  -0.900
+    .dw -205   ; col 2:  -0.800
+    .dw -179   ; col 3:  -0.700
+    .dw -154   ; col 4:  -0.600
+    .dw -128   ; col 5:  -0.500
+    .dw -102   ; col 6:  -0.400
+    .dw -77    ; col 7:  -0.300
+    .dw -51    ; col 8:  -0.200
+    .dw -26    ; col 9:  -0.100
+    .dw 0      ; col 10:  0.000
+    .dw 26     ; col 11: +0.100
+    .dw 51     ; col 12: +0.200
+    .dw 77     ; col 13: +0.300
+    .dw 102    ; col 14: +0.400
+    .dw 128    ; col 15: +0.500
+    .dw 154    ; col 16: +0.600
+    .dw 179    ; col 17: +0.700
+    .dw 205    ; col 18: +0.800
+    .dw 230    ; col 19: +0.900
 
 ; --- recip_tbl: 256 entries (u16) ---
+; recip_tbl[i] = min(65536 / i, $7FFF) for i=1..255, entry 0 unused
 recip_tbl:
     .dw $7FFF  ; 0
     .dw $7FFF  ; 1
@@ -1378,263 +1139,265 @@ recip_tbl:
     .dw $0102  ; 255
 
 ; --- height_tbl: 256 entries (u8) ---
+; height_tbl[i] = min(96, 1536 / max(i, 1))
+; Index = perpDist >> 4; i=16 = distance 1.0, i=32 = distance 2.0, etc.
 height_tbl:
-    .db 144    ; 0
-    .db 144    ; 1
-    .db 144    ; 2
-    .db 144    ; 3
-    .db 144    ; 4
-    .db 144    ; 5
-    .db 144    ; 6
-    .db 144    ; 7
-    .db 144    ; 8
-    .db 144    ; 9
-    .db 144    ; 10
-    .db 144    ; 11
-    .db 144    ; 12
-    .db 144    ; 13
-    .db 144    ; 14
-    .db 144    ; 15
-    .db 144    ; 16
-    .db 135    ; 17
-    .db 128    ; 18
-    .db 121    ; 19
-    .db 115    ; 20
-    .db 109    ; 21
-    .db 104    ; 22
-    .db 100    ; 23
-    .db  96    ; 24
-    .db  92    ; 25
-    .db  88    ; 26
-    .db  85    ; 27
-    .db  82    ; 28
-    .db  79    ; 29
-    .db  76    ; 30
-    .db  74    ; 31
-    .db  72    ; 32
-    .db  69    ; 33
-    .db  67    ; 34
-    .db  65    ; 35
-    .db  64    ; 36
-    .db  62    ; 37
-    .db  60    ; 38
-    .db  59    ; 39
-    .db  57    ; 40
-    .db  56    ; 41
-    .db  54    ; 42
-    .db  53    ; 43
-    .db  52    ; 44
-    .db  51    ; 45
-    .db  50    ; 46
-    .db  49    ; 47
-    .db  48    ; 48
-    .db  47    ; 49
-    .db  46    ; 50
-    .db  45    ; 51
-    .db  44    ; 52
-    .db  43    ; 53
-    .db  42    ; 54
-    .db  41    ; 55
-    .db  41    ; 56
-    .db  40    ; 57
-    .db  39    ; 58
-    .db  39    ; 59
-    .db  38    ; 60
-    .db  37    ; 61
-    .db  37    ; 62
-    .db  36    ; 63
-    .db  36    ; 64
-    .db  35    ; 65
-    .db  34    ; 66
-    .db  34    ; 67
-    .db  33    ; 68
-    .db  33    ; 69
-    .db  32    ; 70
-    .db  32    ; 71
-    .db  32    ; 72
-    .db  31    ; 73
-    .db  31    ; 74
-    .db  30    ; 75
-    .db  30    ; 76
-    .db  29    ; 77
-    .db  29    ; 78
-    .db  29    ; 79
-    .db  28    ; 80
-    .db  28    ; 81
-    .db  28    ; 82
-    .db  27    ; 83
-    .db  27    ; 84
-    .db  27    ; 85
-    .db  26    ; 86
-    .db  26    ; 87
-    .db  26    ; 88
-    .db  25    ; 89
-    .db  25    ; 90
-    .db  25    ; 91
-    .db  25    ; 92
-    .db  24    ; 93
-    .db  24    ; 94
-    .db  24    ; 95
-    .db  24    ; 96
-    .db  23    ; 97
-    .db  23    ; 98
-    .db  23    ; 99
-    .db  23    ; 100
-    .db  22    ; 101
-    .db  22    ; 102
-    .db  22    ; 103
-    .db  22    ; 104
-    .db  21    ; 105
-    .db  21    ; 106
-    .db  21    ; 107
-    .db  21    ; 108
-    .db  21    ; 109
-    .db  20    ; 110
-    .db  20    ; 111
-    .db  20    ; 112
-    .db  20    ; 113
-    .db  20    ; 114
-    .db  20    ; 115
-    .db  19    ; 116
-    .db  19    ; 117
-    .db  19    ; 118
-    .db  19    ; 119
-    .db  19    ; 120
-    .db  19    ; 121
-    .db  18    ; 122
-    .db  18    ; 123
-    .db  18    ; 124
-    .db  18    ; 125
-    .db  18    ; 126
-    .db  18    ; 127
-    .db  18    ; 128
-    .db  17    ; 129
-    .db  17    ; 130
-    .db  17    ; 131
-    .db  17    ; 132
-    .db  17    ; 133
-    .db  17    ; 134
-    .db  17    ; 135
-    .db  16    ; 136
-    .db  16    ; 137
-    .db  16    ; 138
-    .db  16    ; 139
-    .db  16    ; 140
-    .db  16    ; 141
-    .db  16    ; 142
-    .db  16    ; 143
-    .db  16    ; 144
-    .db  15    ; 145
-    .db  15    ; 146
-    .db  15    ; 147
-    .db  15    ; 148
-    .db  15    ; 149
-    .db  15    ; 150
-    .db  15    ; 151
-    .db  15    ; 152
-    .db  15    ; 153
-    .db  14    ; 154
-    .db  14    ; 155
-    .db  14    ; 156
-    .db  14    ; 157
-    .db  14    ; 158
-    .db  14    ; 159
-    .db  14    ; 160
-    .db  14    ; 161
-    .db  14    ; 162
-    .db  14    ; 163
-    .db  14    ; 164
-    .db  13    ; 165
-    .db  13    ; 166
-    .db  13    ; 167
-    .db  13    ; 168
-    .db  13    ; 169
-    .db  13    ; 170
-    .db  13    ; 171
-    .db  13    ; 172
-    .db  13    ; 173
-    .db  13    ; 174
-    .db  13    ; 175
-    .db  13    ; 176
-    .db  13    ; 177
-    .db  12    ; 178
-    .db  12    ; 179
-    .db  12    ; 180
-    .db  12    ; 181
-    .db  12    ; 182
-    .db  12    ; 183
-    .db  12    ; 184
-    .db  12    ; 185
-    .db  12    ; 186
-    .db  12    ; 187
-    .db  12    ; 188
-    .db  12    ; 189
-    .db  12    ; 190
-    .db  12    ; 191
-    .db  12    ; 192
-    .db  11    ; 193
-    .db  11    ; 194
-    .db  11    ; 195
-    .db  11    ; 196
-    .db  11    ; 197
-    .db  11    ; 198
-    .db  11    ; 199
-    .db  11    ; 200
-    .db  11    ; 201
-    .db  11    ; 202
-    .db  11    ; 203
-    .db  11    ; 204
-    .db  11    ; 205
-    .db  11    ; 206
-    .db  11    ; 207
-    .db  11    ; 208
-    .db  11    ; 209
-    .db  10    ; 210
-    .db  10    ; 211
-    .db  10    ; 212
-    .db  10    ; 213
-    .db  10    ; 214
-    .db  10    ; 215
-    .db  10    ; 216
-    .db  10    ; 217
-    .db  10    ; 218
-    .db  10    ; 219
-    .db  10    ; 220
-    .db  10    ; 221
-    .db  10    ; 222
-    .db  10    ; 223
-    .db  10    ; 224
-    .db  10    ; 225
-    .db  10    ; 226
-    .db  10    ; 227
-    .db  10    ; 228
-    .db  10    ; 229
-    .db  10    ; 230
-    .db   9    ; 231
-    .db   9    ; 232
-    .db   9    ; 233
-    .db   9    ; 234
-    .db   9    ; 235
-    .db   9    ; 236
-    .db   9    ; 237
-    .db   9    ; 238
-    .db   9    ; 239
-    .db   9    ; 240
-    .db   9    ; 241
-    .db   9    ; 242
-    .db   9    ; 243
-    .db   9    ; 244
-    .db   9    ; 245
-    .db   9    ; 246
-    .db   9    ; 247
-    .db   9    ; 248
-    .db   9    ; 249
-    .db   9    ; 250
-    .db   9    ; 251
-    .db   9    ; 252
-    .db   9    ; 253
-    .db   9    ; 254
-    .db   9    ; 255
+    .db  96    ; 0
+    .db  96    ; 1
+    .db  96    ; 2
+    .db  96    ; 3
+    .db  96    ; 4
+    .db  96    ; 5
+    .db  96    ; 6
+    .db  96    ; 7
+    .db  96    ; 8
+    .db  96    ; 9
+    .db  96    ; 10
+    .db  96    ; 11
+    .db  96    ; 12
+    .db  96    ; 13
+    .db  96    ; 14
+    .db  96    ; 15
+    .db  96    ; 16
+    .db  90    ; 17
+    .db  85    ; 18
+    .db  80    ; 19
+    .db  76    ; 20
+    .db  73    ; 21
+    .db  69    ; 22
+    .db  66    ; 23
+    .db  64    ; 24
+    .db  61    ; 25
+    .db  59    ; 26
+    .db  56    ; 27
+    .db  54    ; 28
+    .db  52    ; 29
+    .db  51    ; 30
+    .db  49    ; 31
+    .db  48    ; 32
+    .db  46    ; 33
+    .db  45    ; 34
+    .db  43    ; 35
+    .db  42    ; 36
+    .db  41    ; 37
+    .db  40    ; 38
+    .db  39    ; 39
+    .db  38    ; 40
+    .db  37    ; 41
+    .db  36    ; 42
+    .db  35    ; 43
+    .db  34    ; 44
+    .db  34    ; 45
+    .db  33    ; 46
+    .db  32    ; 47
+    .db  32    ; 48
+    .db  31    ; 49
+    .db  30    ; 50
+    .db  30    ; 51
+    .db  29    ; 52
+    .db  28    ; 53
+    .db  28    ; 54
+    .db  27    ; 55
+    .db  27    ; 56
+    .db  26    ; 57
+    .db  26    ; 58
+    .db  26    ; 59
+    .db  25    ; 60
+    .db  25    ; 61
+    .db  24    ; 62
+    .db  24    ; 63
+    .db  24    ; 64
+    .db  23    ; 65
+    .db  23    ; 66
+    .db  22    ; 67
+    .db  22    ; 68
+    .db  22    ; 69
+    .db  21    ; 70
+    .db  21    ; 71
+    .db  21    ; 72
+    .db  21    ; 73
+    .db  20    ; 74
+    .db  20    ; 75
+    .db  20    ; 76
+    .db  19    ; 77
+    .db  19    ; 78
+    .db  19    ; 79
+    .db  19    ; 80
+    .db  18    ; 81
+    .db  18    ; 82
+    .db  18    ; 83
+    .db  18    ; 84
+    .db  18    ; 85
+    .db  17    ; 86
+    .db  17    ; 87
+    .db  17    ; 88
+    .db  17    ; 89
+    .db  17    ; 90
+    .db  16    ; 91
+    .db  16    ; 92
+    .db  16    ; 93
+    .db  16    ; 94
+    .db  16    ; 95
+    .db  16    ; 96
+    .db  15    ; 97
+    .db  15    ; 98
+    .db  15    ; 99
+    .db  15    ; 100
+    .db  15    ; 101
+    .db  15    ; 102
+    .db  14    ; 103
+    .db  14    ; 104
+    .db  14    ; 105
+    .db  14    ; 106
+    .db  14    ; 107
+    .db  14    ; 108
+    .db  14    ; 109
+    .db  13    ; 110
+    .db  13    ; 111
+    .db  13    ; 112
+    .db  13    ; 113
+    .db  13    ; 114
+    .db  13    ; 115
+    .db  13    ; 116
+    .db  13    ; 117
+    .db  13    ; 118
+    .db  12    ; 119
+    .db  12    ; 120
+    .db  12    ; 121
+    .db  12    ; 122
+    .db  12    ; 123
+    .db  12    ; 124
+    .db  12    ; 125
+    .db  12    ; 126
+    .db  12    ; 127
+    .db  12    ; 128
+    .db  11    ; 129
+    .db  11    ; 130
+    .db  11    ; 131
+    .db  11    ; 132
+    .db  11    ; 133
+    .db  11    ; 134
+    .db  11    ; 135
+    .db  11    ; 136
+    .db  11    ; 137
+    .db  11    ; 138
+    .db  11    ; 139
+    .db  10    ; 140
+    .db  10    ; 141
+    .db  10    ; 142
+    .db  10    ; 143
+    .db  10    ; 144
+    .db  10    ; 145
+    .db  10    ; 146
+    .db  10    ; 147
+    .db  10    ; 148
+    .db  10    ; 149
+    .db  10    ; 150
+    .db  10    ; 151
+    .db  10    ; 152
+    .db  10    ; 153
+    .db   9    ; 154
+    .db   9    ; 155
+    .db   9    ; 156
+    .db   9    ; 157
+    .db   9    ; 158
+    .db   9    ; 159
+    .db   9    ; 160
+    .db   9    ; 161
+    .db   9    ; 162
+    .db   9    ; 163
+    .db   9    ; 164
+    .db   9    ; 165
+    .db   9    ; 166
+    .db   9    ; 167
+    .db   9    ; 168
+    .db   9    ; 169
+    .db   9    ; 170
+    .db   8    ; 171
+    .db   8    ; 172
+    .db   8    ; 173
+    .db   8    ; 174
+    .db   8    ; 175
+    .db   8    ; 176
+    .db   8    ; 177
+    .db   8    ; 178
+    .db   8    ; 179
+    .db   8    ; 180
+    .db   8    ; 181
+    .db   8    ; 182
+    .db   8    ; 183
+    .db   8    ; 184
+    .db   8    ; 185
+    .db   8    ; 186
+    .db   8    ; 187
+    .db   8    ; 188
+    .db   8    ; 189
+    .db   8    ; 190
+    .db   8    ; 191
+    .db   8    ; 192
+    .db   7    ; 193
+    .db   7    ; 194
+    .db   7    ; 195
+    .db   7    ; 196
+    .db   7    ; 197
+    .db   7    ; 198
+    .db   7    ; 199
+    .db   7    ; 200
+    .db   7    ; 201
+    .db   7    ; 202
+    .db   7    ; 203
+    .db   7    ; 204
+    .db   7    ; 205
+    .db   7    ; 206
+    .db   7    ; 207
+    .db   7    ; 208
+    .db   7    ; 209
+    .db   7    ; 210
+    .db   7    ; 211
+    .db   7    ; 212
+    .db   7    ; 213
+    .db   7    ; 214
+    .db   7    ; 215
+    .db   7    ; 216
+    .db   7    ; 217
+    .db   7    ; 218
+    .db   7    ; 219
+    .db   6    ; 220
+    .db   6    ; 221
+    .db   6    ; 222
+    .db   6    ; 223
+    .db   6    ; 224
+    .db   6    ; 225
+    .db   6    ; 226
+    .db   6    ; 227
+    .db   6    ; 228
+    .db   6    ; 229
+    .db   6    ; 230
+    .db   6    ; 231
+    .db   6    ; 232
+    .db   6    ; 233
+    .db   6    ; 234
+    .db   6    ; 235
+    .db   6    ; 236
+    .db   6    ; 237
+    .db   6    ; 238
+    .db   6    ; 239
+    .db   6    ; 240
+    .db   6    ; 241
+    .db   6    ; 242
+    .db   6    ; 243
+    .db   6    ; 244
+    .db   6    ; 245
+    .db   6    ; 246
+    .db   6    ; 247
+    .db   6    ; 248
+    .db   6    ; 249
+    .db   6    ; 250
+    .db   6    ; 251
+    .db   6    ; 252
+    .db   6    ; 253
+    .db   6    ; 254
+    .db   6    ; 255
 
 ; --- map_data: 10x10 map ---
 map_data:
