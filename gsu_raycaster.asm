@@ -925,87 +925,113 @@ _col_loop:
     inc r7
     stb (r7)
 
-    ; --- Determine tile color ---
-    ; pixel_y_start = tile_row * 8
-    ; pixel_y_end = pixel_y_start + 7
-    lm r7, (RAM_TROW_Y)    ; r7 = pixel_y_start
-    iwt r0, #7
-    from r7
-    to r8
-    add r0                  ; r8 = pixel_y_end (= pixel_y_start + 7)
-
-    ; Is this tile fully ceiling? (pixel_y_end < drawStart)
-    from r8
-    cmp r4                  ; pixel_y_end - drawStart
-    bge _not_pure_ceil
-    nop
-    iwt r9, #RAM_CEIL_BP
-    bra _write_tile
-    nop
-
-_not_pure_ceil:
-    ; Is this tile fully floor? (pixel_y_start > drawEnd)
-    ; Equivalent: drawEnd < pixel_y_start → drawEnd - pixel_y_start < 0
-    from r5
-    cmp r7                  ; drawEnd - pixel_y_start
-    bge _not_pure_floor     ; drawEnd >= pixel_y_start → not floor
-    nop
-    iwt r9, #RAM_FLOOR_BP
-    bra _write_tile
-    nop
-
-_not_pure_floor:
-    ; Wall or transition — use wall color for simplicity
-    iwt r9, #RAM_WALL_BP
-
-_write_tile:
-    ; r9 = pointer to BP array (8 bytes: BP0-BP7)
-    ; r1 = tile write address
-    ; Write 4 BP groups × 8 rows × 2 bytes = 64 bytes
-
-    ; BP group 0 (BP0, BP1)
-    move r10, r9            ; r10 = BP array base
-    ldb (r10)               ; r0 = BP0
-    move r7, r0             ; r7 = BP0 byte
-    inc r10
-    ldb (r10)               ; r0 = BP1
-    move r8, r0             ; r8 = BP1 byte
-    ; Write 8 rows
+    ; --- Per-row tile rendering (pixel-accurate boundaries) ---
+    ; Precompute 8 row color types at $00E0-$00E7
+    ; 0=ceiling, 1=wall, 2=floor
+    lm r7, (RAM_TROW_Y)    ; pixel_y_start for this tile row
+    iwt r10, #$00E0
     ibt r11, #8
-_wt_g0:
-    move r0, r7
-    stb (r1)
-    inc r1
-    move r0, r8
-    stb (r1)
-    inc r1
+_pc_loop:
+    from r7
+    cmp r4                  ; pixel_y - drawStart
+    bge _pc_nc
+    nop
+    ibt r0, #0              ; ceiling
+    bra _pc_store
+    nop
+_pc_nc:
+    from r5
+    cmp r7                  ; drawEnd - pixel_y
+    bge _pc_w
+    nop
+    ibt r0, #2              ; floor
+    bra _pc_store
+    nop
+_pc_w:
+    ibt r0, #1              ; wall
+_pc_store:
+    stb (r10)
+    inc r10
+    inc r7
     ibt r0, #1
     with r11
-    sub r0                  ; r11 -= 1 (manual decrement)
+    sub r0
+    ibt r0, #0
+    from r11
+    cmp r0
+    bne _pc_loop
+    nop
+
+    ; Write 4 BP groups using precomputed color types
+    ; Group 0 (BP0, BP1)
+    iwt r10, #$00E0
+    ibt r11, #8
+_wt_g0:
+    ldb (r10)               ; r0 = color type
+    ibt r8, #1
+    from r0
+    cmp r8
+    blt _wt_g0_c
+    nop
+    beq _wt_g0_w
+    nop
+    iwt r9, #RAM_FLOOR_BP
+    bra _wt_g0_s
+    nop
+_wt_g0_c:
+    iwt r9, #RAM_CEIL_BP
+    bra _wt_g0_s
+    nop
+_wt_g0_w:
+    iwt r9, #RAM_WALL_BP
+_wt_g0_s:
+    ldb (r9)
+    stb (r1)
+    inc r1
+    inc r9
+    ldb (r9)
+    stb (r1)
+    inc r1
+    inc r10
+    ibt r0, #1
+    with r11
+    sub r0
     ibt r0, #0
     from r11
     cmp r0
     bne _wt_g0
     nop
 
-    ; BP group 1 (BP2, BP3)
-    iwt r10, #2
-    from r9
-    to r10
-    add r10                 ; r10 = BP_base + 2
-    ldb (r10)
-    move r7, r0
-    inc r10
-    ldb (r10)
-    move r8, r0
+    ; Group 1 (BP2, BP3)
+    iwt r10, #$00E0
     ibt r11, #8
 _wt_g1:
-    move r0, r7
+    ldb (r10)
+    ibt r8, #1
+    from r0
+    cmp r8
+    blt _wt_g1_c
+    nop
+    beq _wt_g1_w
+    nop
+    iwt r9, #RAM_FLOOR_BP + 2
+    bra _wt_g1_s
+    nop
+_wt_g1_c:
+    iwt r9, #RAM_CEIL_BP + 2
+    bra _wt_g1_s
+    nop
+_wt_g1_w:
+    iwt r9, #RAM_WALL_BP + 2
+_wt_g1_s:
+    ldb (r9)
     stb (r1)
     inc r1
-    move r0, r8
+    inc r9
+    ldb (r9)
     stb (r1)
     inc r1
+    inc r10
     ibt r0, #1
     with r11
     sub r0
@@ -1015,24 +1041,36 @@ _wt_g1:
     bne _wt_g1
     nop
 
-    ; BP group 2 (BP4, BP5)
-    iwt r10, #4
-    from r9
-    to r10
-    add r10
-    ldb (r10)
-    move r7, r0
-    inc r10
-    ldb (r10)
-    move r8, r0
+    ; Group 2 (BP4, BP5)
+    iwt r10, #$00E0
     ibt r11, #8
 _wt_g2:
-    move r0, r7
+    ldb (r10)
+    ibt r8, #1
+    from r0
+    cmp r8
+    blt _wt_g2_c
+    nop
+    beq _wt_g2_w
+    nop
+    iwt r9, #RAM_FLOOR_BP + 4
+    bra _wt_g2_s
+    nop
+_wt_g2_c:
+    iwt r9, #RAM_CEIL_BP + 4
+    bra _wt_g2_s
+    nop
+_wt_g2_w:
+    iwt r9, #RAM_WALL_BP + 4
+_wt_g2_s:
+    ldb (r9)
     stb (r1)
     inc r1
-    move r0, r8
+    inc r9
+    ldb (r9)
     stb (r1)
     inc r1
+    inc r10
     ibt r0, #1
     with r11
     sub r0
@@ -1042,24 +1080,36 @@ _wt_g2:
     bne _wt_g2
     nop
 
-    ; BP group 3 (BP6, BP7)
-    iwt r10, #6
-    from r9
-    to r10
-    add r10
-    ldb (r10)
-    move r7, r0
-    inc r10
-    ldb (r10)
-    move r8, r0
+    ; Group 3 (BP6, BP7)
+    iwt r10, #$00E0
     ibt r11, #8
 _wt_g3:
-    move r0, r7
+    ldb (r10)
+    ibt r8, #1
+    from r0
+    cmp r8
+    blt _wt_g3_c
+    nop
+    beq _wt_g3_w
+    nop
+    iwt r9, #RAM_FLOOR_BP + 6
+    bra _wt_g3_s
+    nop
+_wt_g3_c:
+    iwt r9, #RAM_CEIL_BP + 6
+    bra _wt_g3_s
+    nop
+_wt_g3_w:
+    iwt r9, #RAM_WALL_BP + 6
+_wt_g3_s:
+    ldb (r9)
     stb (r1)
     inc r1
-    move r0, r8
+    inc r9
+    ldb (r9)
     stb (r1)
     inc r1
+    inc r10
     ibt r0, #1
     with r11
     sub r0
@@ -1068,7 +1118,6 @@ _wt_g3:
     cmp r0
     bne _wt_g3
     nop
-
     ; Next column (long branch — _col_loop is >128 bytes away)
     inc r2
     ibt r0, #NUM_COLS

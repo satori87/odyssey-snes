@@ -29,8 +29,8 @@
 ;; -------------------------------------------------------
 ;; Constants
 ;; -------------------------------------------------------
-.define VIEWPORT_BOTTOM  176   ; bottom IRQ fires here -> forced blank
-.define IRQ_BOTTOM       176
+.define VIEWPORT_BOTTOM  184   ; bottom IRQ fires here -> forced blank (after 144px viewport + 5 rows border)
+.define IRQ_BOTTOM       184
 
 ;; WRAM addresses for IRQ stub and sync flag
 .define JML_STUB         $7E1F00   ; 4 bytes: JML opcode + 24-bit target
@@ -748,41 +748,149 @@ dmaFramebuffer:
     php
     sep #$20
     rep #$10
-    ; Force blank
-    lda #$80
-    sta.l $2100
+
     ; Give SNES RAM access
     lda #$16
     sta.l $303A
-    ; VMAIN: word increment
-    lda #$80
-    sta.l $2115
-    ; VRAM addr = $0000
-    rep #$20
-    lda #$0000
-    sta.l $2116
-    sep #$20
-    ; DMA setup: word-mode to $2118/$2119
+
+    ; DMA setup (constant across all batches)
     lda #$01
     sta.l $4300          ; DMAP: 2-register word write
     lda #$18
     sta.l $4301          ; BBAD: $2118 (VMDATAL)
+    lda #$70
+    sta.l $4304          ; source bank $70
+    lda #$80
+    sta.l $2115          ; VMAIN: word increment
+
+    ; === 6-batch VBlank DMA: 6 × 5184 = 31104 bytes ===
+    ; No forced blank — DMA only during VBlank, no flicker
+
+    ; Batch 1: VRAM $0000, source $0400, 5184 bytes
+@WNV1:
+    lda.l $4212
+    and #$80
+    bne @WNV1
+@WV1:
+    lda.l $4212
+    and #$80
+    beq @WV1
     rep #$20
+    lda #$0000
+    sta.l $2116
     lda #$0400
     sta.l $4302
-    sep #$20
-    lda #$70
-    sta.l $4304
-    rep #$20
-    lda #TILE_DATA_SIZE  ; 15360 bytes
+    lda #5184
     sta.l $4305
     sep #$20
     lda #$01
     sta.l $420B
+
+    ; Batch 2: VRAM $0A20, source $1844, 5184 bytes
+@WNV2:
+    lda.l $4212
+    and #$80
+    bne @WNV2
+@WV2:
+    lda.l $4212
+    and #$80
+    beq @WV2
+    rep #$20
+    lda #$0A20           ; 5184/2 = 2592 words
+    sta.l $2116
+    lda #$0400 + 5184
+    sta.l $4302
+    lda #5184
+    sta.l $4305
+    sep #$20
+    lda #$01
+    sta.l $420B
+
+    ; Batch 3: VRAM $1440, source $2C88, 5184 bytes
+@WNV3:
+    lda.l $4212
+    and #$80
+    bne @WNV3
+@WV3:
+    lda.l $4212
+    and #$80
+    beq @WV3
+    rep #$20
+    lda #$1440           ; 2 × 2592
+    sta.l $2116
+    lda #$0400 + 10368
+    sta.l $4302
+    lda #5184
+    sta.l $4305
+    sep #$20
+    lda #$01
+    sta.l $420B
+
+    ; Batch 4: VRAM $1E60, source $40CC, 5184 bytes
+@WNV4:
+    lda.l $4212
+    and #$80
+    bne @WNV4
+@WV4:
+    lda.l $4212
+    and #$80
+    beq @WV4
+    rep #$20
+    lda #$1E60           ; 3 × 2592
+    sta.l $2116
+    lda #$0400 + 15552
+    sta.l $4302
+    lda #5184
+    sta.l $4305
+    sep #$20
+    lda #$01
+    sta.l $420B
+
+    ; Batch 5: VRAM $2880, source $5510, 5184 bytes
+@WNV5:
+    lda.l $4212
+    and #$80
+    bne @WNV5
+@WV5:
+    lda.l $4212
+    and #$80
+    beq @WV5
+    rep #$20
+    lda #$2880           ; 4 × 2592
+    sta.l $2116
+    lda #$0400 + 20736
+    sta.l $4302
+    lda #5184
+    sta.l $4305
+    sep #$20
+    lda #$01
+    sta.l $420B
+
+    ; Batch 6: VRAM $32A0, source $6954, 5184 bytes
+@WNV6:
+    lda.l $4212
+    and #$80
+    bne @WNV6
+@WV6:
+    lda.l $4212
+    and #$80
+    beq @WV6
+    rep #$20
+    lda #$32A0           ; 5 × 2592
+    sta.l $2116
+    lda #$0400 + 25920
+    sta.l $4302
+    lda #5184
+    sta.l $4305
+    sep #$20
+    lda #$01
+    sta.l $420B
+
     ; Give GSU back RAM
     lda #$1E
     sta.l $303A
-    ; Screen on with Mode 3
+
+    ; Ensure display regs correct
     lda #$03
     sta.l $2105          ; Mode 3
     lda #$01

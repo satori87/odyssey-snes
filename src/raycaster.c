@@ -216,7 +216,6 @@ int main(void) {
         handleInput();
         writePlayerState();
         startGSU();
-        waitVBlankSimple();
         dmaFramebuffer();
     }
 
