@@ -4,9 +4,7 @@
 .16bit
 .define __fp_mul_locals 12
 .define __initPlayer_locals 0
-.define __updateVectors_locals 0
-.define __isWall_locals 2
-.define __handleInput_locals 10
+.define __handleInput_locals 6
 .define __main_locals 0
 
 .SECTION ".fp_multext_0x0" SUPERFREE
@@ -219,92 +217,15 @@ sec
 sbc #__initPlayer_locals
 tas
 .endif
-lda.w #640
+lda.w #200
 sta.w posX + 0
-lda.w #640
+lda.w #200
 sta.w posY + 0
 lda.w #0
+sta.b tcc__r0
 sep #$20
 sta.w playerAngle + 0
 rep #$20
-lda.w #0
-sep #$20
-lda.w playerAngle + 0
-rep #$20
-asl a
-sta.b tcc__r0
-lda.w #:cos_table
-sta.b tcc__r1h
-lda.w #cos_table + 0
-clc
-adc.b tcc__r0
-sta.b tcc__r1
-lda.b [tcc__r1]
-sta.w dirX + 0
-lda.w #0
-sep #$20
-lda.w playerAngle + 0
-rep #$20
-asl a
-sta.b tcc__r0
-lda.w #:sin_table
-sta.b tcc__r1h
-lda.w #sin_table + 0
-clc
-adc.b tcc__r0
-sta.b tcc__r1
-lda.b [tcc__r1]
-sta.w dirY + 0
-lda.w #0
-sep #$20
-lda.w playerAngle + 0
-rep #$20
-asl a
-sta.b tcc__r0
-lda.w #:sin_table
-sta.b tcc__r1h
-lda.w #sin_table + 0
-clc
-adc.b tcc__r0
-sta.b tcc__r1
-stz.b tcc__r0
-lda.b [tcc__r1]
-sta.b tcc__r2
-sec
-lda.b tcc__r0
-sbc.b tcc__r2
-sta.b tcc__r0
-pea.w 169
-pei (tcc__r0)
-jsr.l fp_mul
-tsa
-clc
-adc #4
-tas
-lda.b tcc__r0
-sta.w planeX + 0
-lda.w #0
-sep #$20
-lda.w playerAngle + 0
-rep #$20
-asl a
-sta.b tcc__r0
-lda.w #:cos_table
-sta.b tcc__r1h
-lda.w #cos_table + 0
-clc
-adc.b tcc__r0
-sta.b tcc__r1
-pea.w 169
-lda.b [tcc__r1]
-pha
-jsr.l fp_mul
-tsa
-clc
-adc #4
-tas
-lda.b tcc__r0
-sta.w planeY + 0
 .ifgr __initPlayer_locals 0
 tsa
 clc
@@ -314,251 +235,7 @@ tas
 rtl
 .ENDS
 
-.SECTION ".updateVectorstext_0x2" SUPERFREE
-
-updateVectors:
-.ifgr __updateVectors_locals 0
-tsa
-sec
-sbc #__updateVectors_locals
-tas
-.endif
-lda.w #0
-sep #$20
-lda.w playerAngle + 0
-rep #$20
-asl a
-sta.b tcc__r0
-lda.w #:cos_table
-sta.b tcc__r1h
-lda.w #cos_table + 0
-clc
-adc.b tcc__r0
-sta.b tcc__r1
-lda.b [tcc__r1]
-sta.w dirX + 0
-lda.w #0
-sep #$20
-lda.w playerAngle + 0
-rep #$20
-asl a
-sta.b tcc__r0
-lda.w #:sin_table
-sta.b tcc__r1h
-lda.w #sin_table + 0
-clc
-adc.b tcc__r0
-sta.b tcc__r1
-lda.b [tcc__r1]
-sta.w dirY + 0
-lda.w #0
-sep #$20
-lda.w playerAngle + 0
-rep #$20
-asl a
-sta.b tcc__r0
-lda.w #:sin_table
-sta.b tcc__r1h
-lda.w #sin_table + 0
-clc
-adc.b tcc__r0
-sta.b tcc__r1
-stz.b tcc__r0
-lda.b [tcc__r1]
-sta.b tcc__r2
-sec
-lda.b tcc__r0
-sbc.b tcc__r2
-sta.b tcc__r0
-pea.w 169
-pei (tcc__r0)
-jsr.l fp_mul
-tsa
-clc
-adc #4
-tas
-lda.b tcc__r0
-sta.w planeX + 0
-lda.w #0
-sep #$20
-lda.w playerAngle + 0
-rep #$20
-asl a
-sta.b tcc__r0
-lda.w #:cos_table
-sta.b tcc__r1h
-lda.w #cos_table + 0
-clc
-adc.b tcc__r0
-sta.b tcc__r1
-pea.w 169
-lda.b [tcc__r1]
-pha
-jsr.l fp_mul
-tsa
-clc
-adc #4
-tas
-lda.b tcc__r0
-sta.w planeY + 0
-.ifgr __updateVectors_locals 0
-tsa
-clc
-adc #__updateVectors_locals
-tas
-.endif
-rtl
-.ENDS
-
-.SECTION ".isWalltext_0x3" SUPERFREE
-
-isWall:
-.ifgr __isWall_locals 0
-tsa
-sec
-sbc #__isWall_locals
-tas
-.endif
-lda 3 + __isWall_locals + 1,s
-sta.b tcc__r0
-ldy.w #8
--
-cmp #$8000
-ror a
-dey
-bne -
-+
-and.w #255
-sep #$20
-sta -1 + __isWall_locals + 1,s
-rep #$20
-lda 5 + __isWall_locals + 1,s
-sta.b tcc__r0
-ldy.w #8
--
-cmp #$8000
-ror a
-dey
-bne -
-+
-and.w #255
-sep #$20
-sta -2 + __isWall_locals + 1,s
-rep #$20
-lda.w #0
-sep #$20
-lda -1 + __isWall_locals + 1,s
-rep #$20
-sta.b tcc__r0
-ldx #1
-sec
-sbc.w #10
-tay
-bvc +
-eor #$8000
-+
-bpl +++
-++
-dex
-+++
-stx.b tcc__r5
-txa
-beq +
-brl __local_5
-+
-lda.w #0
-sep #$20
-lda -2 + __isWall_locals + 1,s
-rep #$20
-sta.b tcc__r0
-ldx #1
-sec
-sbc.w #10
-tay
-bvc +
-eor #$8000
-+
-bpl +++
-++
-dex
-+++
-stx.b tcc__r5
-txa
-beq +
-__local_5:
-brl __local_6
-+
-bra __local_7
-__local_6:
-lda.w #1
-sta.b tcc__r0
-jmp.w __local_8
-__local_7:
-lda.w #0
-sep #$20
-lda -2 + __isWall_locals + 1,s
-rep #$20
-sta.b tcc__r0
-lda.w #10
-sta.b tcc__r9
-lda.b tcc__r0
-sta.b tcc__r10
-jsr.l tcc__mul
-sta.b tcc__r0
-lda.w #:world_map
-sta.b tcc__r1h
-lda.w #world_map + 0
-clc
-adc.b tcc__r0
-sta.b tcc__r1
-lda.w #0
-sep #$20
-lda -1 + __isWall_locals + 1,s
-rep #$20
-clc
-adc.b tcc__r1
-sta.b tcc__r1
-lda.w #0
-sep #$20
-lda.b [tcc__r1]
-rep #$20
-sta.b tcc__r0
-ldx #1
-sec
-sbc #0
-tay
-bne +
-dex
-+
-stx.b tcc__r5
-txa
-bne +
-brl __local_9
-+
-bra __local_10
-__local_9:
-lda.w #0
-sta.b tcc__r0
-bra __local_11
-__local_10:
-lda.w #1
-sta.b tcc__r0
-__local_11:
-lda.b tcc__r0
-and.w #255
-sta.b tcc__r0
-__local_8:
-__local_12:
-.ifgr __isWall_locals 0
-tsa
-clc
-adc #__isWall_locals
-tas
-.endif
-rtl
-.ENDS
-
-.SECTION ".handleInputtext_0x4" SUPERFREE
+.SECTION ".handleInputtext_0x2" SUPERFREE
 
 handleInput:
 .ifgr __handleInput_locals 0
@@ -574,7 +251,7 @@ and.w #512
 sta.b tcc__r0
 lda.b tcc__r0 ; DON'T OPTIMIZE
 bne +
-brl __local_13
+brl __local_5
 +
 lda.w #0
 sep #$20
@@ -582,17 +259,17 @@ lda.w playerAngle + 0
 rep #$20
 sec
 sbc.w #4
+sta.b tcc__r0
 sep #$20
 sta.w playerAngle + 0
 rep #$20
-jsr.l updateVectors
-__local_13:
+__local_5:
 lda -2 + __handleInput_locals + 1,s
 and.w #256
 sta.b tcc__r0
 lda.b tcc__r0 ; DON'T OPTIMIZE
 bne +
-brl __local_14
+brl __local_6
 +
 lda.w #0
 sep #$20
@@ -600,331 +277,387 @@ lda.w playerAngle + 0
 rep #$20
 clc
 adc.w #4
+sta.b tcc__r0
 sep #$20
 sta.w playerAngle + 0
 rep #$20
-jsr.l updateVectors
-__local_14:
+__local_6:
 lda -2 + __handleInput_locals + 1,s
 and.w #2048
 sta.b tcc__r0
 lda.b tcc__r0 ; DON'T OPTIMIZE
 bne +
-brl __local_15
+brl __local_7
 +
-pea.w 20
-lda.w dirX + 0
-pha
-jsr.l fp_mul
-tsa
-clc
-adc #4
-tas
-lda.b tcc__r0
-sta -8 + __handleInput_locals + 1,s
-pea.w 20
-lda.w dirY + 0
-pha
-jsr.l fp_mul
-tsa
-clc
-adc #4
-tas
-lda.b tcc__r0
-sta -10 + __handleInput_locals + 1,s
-lda.w posX + 0
+lda.w #0
+sep #$20
+lda.w playerAngle + 0
+rep #$20
+asl a
 sta.b tcc__r0
-lda -8 + __handleInput_locals + 1,s
+lda.w #:cos_table
+sta.b tcc__r1h
+lda.w #cos_table + 0
 clc
 adc.b tcc__r0
+sta.b tcc__r1
+lda.b [tcc__r1]
+asl a
+asl a
+asl a
+asl a
+sta.b tcc__r0
+ldy.w #8
+-
+cmp #$8000
+ror a
+dey
+bne -
++
 sta -4 + __handleInput_locals + 1,s
-lda.w posY + 0
+lda.w #0
+sep #$20
+lda.w playerAngle + 0
+rep #$20
+asl a
 sta.b tcc__r0
-lda -10 + __handleInput_locals + 1,s
+lda.w #:sin_table
+sta.b tcc__r1h
+lda.w #sin_table + 0
 clc
 adc.b tcc__r0
-sta -6 + __handleInput_locals + 1,s
-lda.w posY + 0
-pha
-lda -2 + __handleInput_locals + 1,s
-pha
-jsr.l isWall
-tsa
-clc
-adc #4
-tas
-lda.b tcc__r0 ; DON'T OPTIMIZE
-bne +
-brl __local_16
-+
-bra __local_17
-__local_16:
-lda -4 + __handleInput_locals + 1,s
+sta.b tcc__r1
+lda.b [tcc__r1]
+asl a
+asl a
+asl a
+asl a
 sta.b tcc__r0
-sta.w posX + 0
-__local_17:
-lda -6 + __handleInput_locals + 1,s
-pha
-lda.w posX + 0
-pha
-jsr.l isWall
-tsa
-clc
-adc #4
-tas
-lda.b tcc__r0 ; DON'T OPTIMIZE
-bne +
-brl __local_18
+ldy.w #8
+-
+cmp #$8000
+ror a
+dey
+bne -
 +
-bra __local_19
-__local_18:
+sta -6 + __handleInput_locals + 1,s
+lda.w posX + 0
+sta.b tcc__r0
+lda -4 + __handleInput_locals + 1,s
+clc
+adc.b tcc__r0
+sta.w posX + 0
+lda.w posY + 0
+sta.b tcc__r0
 lda -6 + __handleInput_locals + 1,s
+sta.b tcc__r1
+clc
+adc.b tcc__r0
 sta.b tcc__r0
 sta.w posY + 0
-__local_19:
-__local_15:
+__local_7:
 lda -2 + __handleInput_locals + 1,s
 and.w #1024
 sta.b tcc__r0
 lda.b tcc__r0 ; DON'T OPTIMIZE
 bne +
-brl __local_20
+brl __local_8
 +
-pea.w 20
-lda.w dirX + 0
-pha
-jsr.l fp_mul
-tsa
-clc
-adc #4
-tas
-lda.b tcc__r0
-sta -8 + __handleInput_locals + 1,s
-pea.w 20
-lda.w dirY + 0
-pha
-jsr.l fp_mul
-tsa
-clc
-adc #4
-tas
-lda.b tcc__r0
-sta -10 + __handleInput_locals + 1,s
-lda.w posX + 0
+lda.w #0
+sep #$20
+lda.w playerAngle + 0
+rep #$20
+asl a
 sta.b tcc__r0
-lda -8 + __handleInput_locals + 1,s
+lda.w #:cos_table
+sta.b tcc__r1h
+lda.w #cos_table + 0
+clc
+adc.b tcc__r0
 sta.b tcc__r1
-sec
-lda.b tcc__r0
-sbc.b tcc__r1
+lda.b [tcc__r1]
+asl a
+asl a
+asl a
+asl a
+sta.b tcc__r0
+ldy.w #8
+-
+cmp #$8000
+ror a
+dey
+bne -
++
 sta -4 + __handleInput_locals + 1,s
-lda.w posY + 0
+lda.w #0
+sep #$20
+lda.w playerAngle + 0
+rep #$20
+asl a
 sta.b tcc__r0
-lda -10 + __handleInput_locals + 1,s
+lda.w #:sin_table
+sta.b tcc__r1h
+lda.w #sin_table + 0
+clc
+adc.b tcc__r0
+sta.b tcc__r1
+lda.b [tcc__r1]
+asl a
+asl a
+asl a
+asl a
+sta.b tcc__r0
+ldy.w #8
+-
+cmp #$8000
+ror a
+dey
+bne -
++
+sta -6 + __handleInput_locals + 1,s
+lda.w posX + 0
+sta.b tcc__r0
+lda -4 + __handleInput_locals + 1,s
 sta.b tcc__r1
 sec
 lda.b tcc__r0
 sbc.b tcc__r1
-sta -6 + __handleInput_locals + 1,s
-lda.w posY + 0
-pha
-lda -2 + __handleInput_locals + 1,s
-pha
-jsr.l isWall
-tsa
-clc
-adc #4
-tas
-lda.b tcc__r0 ; DON'T OPTIMIZE
-bne +
-brl __local_21
-+
-bra __local_22
-__local_21:
-lda -4 + __handleInput_locals + 1,s
-sta.b tcc__r0
 sta.w posX + 0
-__local_22:
+lda.w posY + 0
+sta.b tcc__r0
 lda -6 + __handleInput_locals + 1,s
-pha
-lda.w posX + 0
-pha
-jsr.l isWall
-tsa
-clc
-adc #4
-tas
-lda.b tcc__r0 ; DON'T OPTIMIZE
-bne +
-brl __local_23
-+
-bra __local_24
-__local_23:
-lda -6 + __handleInput_locals + 1,s
+sta.b tcc__r1
+sec
+lda.b tcc__r0
+sbc.b tcc__r1
 sta.b tcc__r0
 sta.w posY + 0
-__local_24:
-__local_20:
+__local_8:
 lda -2 + __handleInput_locals + 1,s
 and.w #32768
 sta.b tcc__r0
 lda.b tcc__r0 ; DON'T OPTIMIZE
 bne +
-brl __local_25
+brl __local_9
 +
-pea.w 20
-lda.w planeX + 0
-pha
-jsr.l fp_mul
-tsa
-clc
-adc #4
-tas
-lda.b tcc__r0
-sta -8 + __handleInput_locals + 1,s
-pea.w 20
-lda.w planeY + 0
-pha
-jsr.l fp_mul
-tsa
-clc
-adc #4
-tas
-lda.b tcc__r0
-sta -10 + __handleInput_locals + 1,s
-lda.w posX + 0
+lda.w #0
+sep #$20
+lda.w playerAngle + 0
+rep #$20
+asl a
 sta.b tcc__r0
-lda -8 + __handleInput_locals + 1,s
+lda.w #:sin_table
+sta.b tcc__r1h
+lda.w #sin_table + 0
+clc
+adc.b tcc__r0
 sta.b tcc__r1
-sec
-lda.b tcc__r0
-sbc.b tcc__r1
+lda.b [tcc__r1]
+asl a
+asl a
+asl a
+asl a
+sta.b tcc__r0
+ldy.w #8
+-
+cmp #$8000
+ror a
+dey
+bne -
++
 sta -4 + __handleInput_locals + 1,s
+lda.w #0
+sep #$20
+lda.w playerAngle + 0
+rep #$20
+asl a
+sta.b tcc__r0
+lda.w #:cos_table
+sta.b tcc__r1h
+lda.w #cos_table + 0
+clc
+adc.b tcc__r0
+sta.b tcc__r1
+lda.b [tcc__r1]
+asl a
+asl a
+asl a
+asl a
+sta.b tcc__r0
+ldy.w #8
+-
+cmp #$8000
+ror a
+dey
+bne -
++
+sta -6 + __handleInput_locals + 1,s
+lda.w posX + 0
+sta.b tcc__r0
+lda -4 + __handleInput_locals + 1,s
+clc
+adc.b tcc__r0
+sta.w posX + 0
 lda.w posY + 0
 sta.b tcc__r0
-lda -10 + __handleInput_locals + 1,s
+lda -6 + __handleInput_locals + 1,s
 sta.b tcc__r1
 sec
 lda.b tcc__r0
 sbc.b tcc__r1
-sta -6 + __handleInput_locals + 1,s
-lda.w posY + 0
-pha
-lda -2 + __handleInput_locals + 1,s
-pha
-jsr.l isWall
-tsa
-clc
-adc #4
-tas
-lda.b tcc__r0 ; DON'T OPTIMIZE
-bne +
-brl __local_26
-+
-bra __local_27
-__local_26:
-lda -4 + __handleInput_locals + 1,s
-sta.b tcc__r0
-sta.w posX + 0
-__local_27:
-lda -6 + __handleInput_locals + 1,s
-pha
-lda.w posX + 0
-pha
-jsr.l isWall
-tsa
-clc
-adc #4
-tas
-lda.b tcc__r0 ; DON'T OPTIMIZE
-bne +
-brl __local_28
-+
-bra __local_29
-__local_28:
-lda -6 + __handleInput_locals + 1,s
 sta.b tcc__r0
 sta.w posY + 0
-__local_29:
-__local_25:
+__local_9:
 lda -2 + __handleInput_locals + 1,s
 and.w #128
 sta.b tcc__r0
 lda.b tcc__r0 ; DON'T OPTIMIZE
 bne +
-brl __local_30
+brl __local_10
 +
-pea.w 20
-lda.w planeX + 0
-pha
-jsr.l fp_mul
-tsa
-clc
-adc #4
-tas
-lda.b tcc__r0
-sta -8 + __handleInput_locals + 1,s
-pea.w 20
-lda.w planeY + 0
-pha
-jsr.l fp_mul
-tsa
-clc
-adc #4
-tas
-lda.b tcc__r0
-sta -10 + __handleInput_locals + 1,s
-lda.w posX + 0
+lda.w #0
+sep #$20
+lda.w playerAngle + 0
+rep #$20
+asl a
 sta.b tcc__r0
-lda -8 + __handleInput_locals + 1,s
+lda.w #:sin_table
+sta.b tcc__r1h
+lda.w #sin_table + 0
 clc
 adc.b tcc__r0
+sta.b tcc__r1
+lda.b [tcc__r1]
+asl a
+asl a
+asl a
+asl a
+sta.b tcc__r0
+ldy.w #8
+-
+cmp #$8000
+ror a
+dey
+bne -
++
 sta -4 + __handleInput_locals + 1,s
-lda.w posY + 0
+lda.w #0
+sep #$20
+lda.w playerAngle + 0
+rep #$20
+asl a
 sta.b tcc__r0
-lda -10 + __handleInput_locals + 1,s
+lda.w #:cos_table
+sta.b tcc__r1h
+lda.w #cos_table + 0
 clc
 adc.b tcc__r0
-sta -6 + __handleInput_locals + 1,s
-lda.w posY + 0
-pha
-lda -2 + __handleInput_locals + 1,s
-pha
-jsr.l isWall
-tsa
-clc
-adc #4
-tas
-lda.b tcc__r0 ; DON'T OPTIMIZE
-bne +
-brl __local_31
-+
-bra __local_32
-__local_31:
-lda -4 + __handleInput_locals + 1,s
+sta.b tcc__r1
+lda.b [tcc__r1]
+asl a
+asl a
+asl a
+asl a
 sta.b tcc__r0
-sta.w posX + 0
-__local_32:
-lda -6 + __handleInput_locals + 1,s
-pha
-lda.w posX + 0
-pha
-jsr.l isWall
-tsa
-clc
-adc #4
-tas
-lda.b tcc__r0 ; DON'T OPTIMIZE
-bne +
-brl __local_33
+ldy.w #8
+-
+cmp #$8000
+ror a
+dey
+bne -
 +
-bra __local_34
-__local_33:
+sta -6 + __handleInput_locals + 1,s
+lda.w posX + 0
+sta.b tcc__r0
+lda -4 + __handleInput_locals + 1,s
+sta.b tcc__r1
+sec
+lda.b tcc__r0
+sbc.b tcc__r1
+sta.w posX + 0
+lda.w posY + 0
+sta.b tcc__r0
 lda -6 + __handleInput_locals + 1,s
+sta.b tcc__r1
+clc
+adc.b tcc__r0
 sta.b tcc__r0
 sta.w posY + 0
-__local_34:
-__local_30:
+__local_10:
+lda.w posX + 0
+sta.b tcc__r0
+sec
+sbc.w #16
+bvc +
+eor #$8000
++
+bmi +
+brl __local_11
++
+lda.w #16
+sta.b tcc__r0
+sta.w posX + 0
+__local_11:
+lda.w posX + 0
+sta.b tcc__r0
+ldx #1
+sec
+sbc.w #1008
+tay
+beq ++
+bvc +
+eor #$8000
++
+bpl +++
+++
+dex
++++
+stx.b tcc__r5
+txa
+bne +
+brl __local_12
++
+lda.w #1008
+sta.b tcc__r0
+sta.w posX + 0
+__local_12:
+lda.w posY + 0
+sta.b tcc__r0
+sec
+sbc.w #16
+bvc +
+eor #$8000
++
+bmi +
+brl __local_13
++
+lda.w #16
+sta.b tcc__r0
+sta.w posY + 0
+__local_13:
+lda.w posY + 0
+sta.b tcc__r0
+ldx #1
+sec
+sbc.w #1008
+tay
+beq ++
+bvc +
+eor #$8000
++
+bpl +++
+++
+dex
++++
+stx.b tcc__r5
+txa
+bne +
+brl __local_14
++
+lda.w #1008
+sta.b tcc__r0
+sta.w posY + 0
+__local_14:
 .ifgr __handleInput_locals 0
 tsa
 clc
@@ -934,7 +667,7 @@ tas
 rtl
 .ENDS
 
-.SECTION ".maintext_0x5" SUPERFREE
+.SECTION ".maintext_0x3" SUPERFREE
 
 main:
 .ifgr __main_locals 0
@@ -947,15 +680,15 @@ jsr.l disableNMI
 jsr.l initMode3Display
 jsr.l initGSU
 jsr.l initPlayer
-__local_35:
+__local_15:
 jsr.l handleInput
 jsr.l writePlayerState
 jsr.l startGSU
 jsr.l dmaFramebuffer
-bra __local_35
+bra __local_15
 lda.w #0
 sta.b tcc__r0
-__local_36:
+__local_16:
 .ifgr __main_locals 0
 tsa
 clc
@@ -966,13 +699,10 @@ rtl
 .ENDS
 .RAMSECTION "ram{WLA_FILENAME}.data" APPENDTO "globram.data"
 
-world_map dsb 100
-
 .ENDS
 
 .SECTION "{WLA_FILENAME}.data" APPENDTO "glob.data"
 
-.db $1,$1,$1,$1,$1,$1,$1,$1,$1,$1,$1,$0,$0,$0,$0,$0,$0,$0,$0,$1,$1,$0,$0,$0,$0,$0,$0,$0,$0,$1,$1,$0,$0,$0,$0,$0,$0,$0,$0,$1,$1,$0,$0,$0,$2,$2,$0,$0,$0,$1,$1,$0,$0,$0,$2,$2,$0,$0,$0,$1,$1,$0,$0,$0,$0,$0,$0,$0,$0,$1,$1,$0,$0,$0,$0,$0,$0,$0,$0,$1,$1,$0,$0,$0,$0,$0,$0,$0,$0,$1,$1,$1,$1,$1,$1,$1,$1,$1,$1,$1
 .ENDS
 
 .SECTION ".rodata" SUPERFREE
@@ -986,9 +716,5 @@ cos_table: .db $0,$1,$0,$1,$0,$1,$ff,$0,$ff,$0,$fe,$0,$fd,$0,$fc,$0,$fb,$0,$fa,$
 .RAMSECTION ".bss" BANK $7e SLOT 2
 posX dsb 2
 posY dsb 2
-dirX dsb 2
-dirY dsb 2
-planeX dsb 2
-planeY dsb 2
 playerAngle dsb 1
 .ENDS

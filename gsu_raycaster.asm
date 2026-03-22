@@ -769,14 +769,14 @@ _not_offscreen:
     from r4
     stw (r9)                    ; col2 → $0032
 
-    ; === Per-column wall height: compute depth per column in fill loop ===
-    lm r5, ($0010)              ; r5 = wallColor
-    ; r3 = col1, r4 = col2 (preserved)
+    ; === Per-column wall height with interpolation ===
+    ; Compute wallHeight at both endpoints, then Bresenham-step across columns.
+    ; This avoids per-column divides — just one add per column in the fill loop.
+    lm r5, ($0010)              ; r5 = wallColor (preserved through fill)
+    ; r3 = col1, r4 = col2 (preserved from projection)
 
-    ; Load segment depths
+    ; === Compute wh1 = WALL_CONST / rotY1 ===
     lm r6, ($0016)              ; r6 = rotY1
-    lm r7, ($001A)              ; r7 = rotY2
-    ; Clamp depths >= 4
     ibt r0, #4
     from r6
     cmp r0
@@ -784,14 +784,171 @@ _not_offscreen:
     nop
     ibt r6, #4
 _fd1ok:
-    from r7
+    ; Binary divide: 576 / r6 → r0
+    iwt r7, #WALL_CONST
+    ibt r2, #0
+    ibt r0, #0
+    iwt r12, #16
+_wh1_div:
+    with r7
+    add r7
+    with r2
+    rol
+    with r0
+    add r0
+    from r2
+    cmp r6
+    blt _wh1_ns
+    nop
+    with r2
+    sub r6
+    inc r0
+_wh1_ns:
+    dec r12
+    bne _wh1_div
+    nop
+    ; Clamp wh1 to SCREEN_H
+    iwt r12, #SCREEN_H
+    from r0
+    cmp r12
+    blt _wh1_ok
+    nop
+    move r0, r12
+_wh1_ok:
+    sm ($001E), r0              ; save wh1
+
+    ; === Compute wh2 = WALL_CONST / rotY2 ===
+    lm r6, ($001A)              ; r6 = rotY2
+    ibt r0, #4
+    from r6
     cmp r0
     bge _fd2ok
     nop
-    ibt r7, #4
+    ibt r6, #4
 _fd2ok:
+    iwt r7, #WALL_CONST
+    ibt r2, #0
+    ibt r0, #0
+    iwt r12, #16
+_wh2_div:
+    with r7
+    add r7
+    with r2
+    rol
+    with r0
+    add r0
+    from r2
+    cmp r6
+    blt _wh2_ns
+    nop
+    with r2
+    sub r6
+    inc r0
+_wh2_ns:
+    dec r12
+    bne _wh2_div
+    nop
+    iwt r12, #SCREEN_H
+    from r0
+    cmp r12
+    blt _wh2_ok
+    nop
+    move r0, r12
+_wh2_ok:
+    ; r0 = wh2, wh1 saved at $001E
 
-    ; Compute starting pointers: base + col1
+    ; === Bresenham setup: step wallHeight from wh1 to wh2 ===
+    lm r6, ($001E)              ; r6 = wh1 (becomes currentWH in fill loop)
+    ; whDelta = wh2 - wh1 (signed)
+    move r7, r0                 ; r7 = wh2
+    with r7
+    sub r6                      ; r7 = wh2 - wh1 (SAFE: move+with+sub)
+
+    ; Determine sign and |whDelta|
+    ibt r9, #0                  ; sign flag (0=positive, 1=negative)
+    moves r0, r7
+    bpl _ws_pos
+    nop
+    from r7
+    not
+    inc r0
+    move r7, r0                 ; r7 = |whDelta|
+    ibt r9, #1
+_ws_pos:
+    ; r7 = |whDelta|, r9 = sign
+
+    ; numCols = col2 - col1 + 1
+    move r0, r4
+    with r0
+    sub r3
+    inc r0
+    move r11, r0                ; r11 = numCols (iteration count for fill loop)
+
+    ; numSteps = max(1, numCols - 1) — intervals between columns
+    move r0, r11
+    with r0
+    sub #1
+    bne _ns_ok
+    nop
+    ibt r0, #1                  ; avoid div-by-zero for single column
+_ns_ok:
+    sm ($0028), r0              ; save numSteps for error check in fill loop
+    move r8, r0                 ; r8 = numSteps (divisor for divide)
+
+    ; Binary divide: |whDelta| / numSteps → r0 (quotient), r2 (remainder)
+    ibt r2, #0
+    ibt r0, #0
+    iwt r12, #16
+_ws_div:
+    with r7
+    add r7
+    with r2
+    rol
+    with r0
+    add r0
+    from r2
+    cmp r8
+    blt _ws_dns
+    nop
+    with r2
+    sub r8
+    inc r0
+_ws_dns:
+    dec r12
+    bne _ws_div
+    nop
+    ; r0 = step_int (unsigned), r2 = step_err
+    ; r9 = sign flag (0=positive, 1=negative) — preserved through divide
+
+    ; Save quotient and remainder BEFORE sign check
+    sm ($001E), r2              ; step_err (unsigned, < numSteps)
+    move r7, r0                 ; r7 = step_int_unsigned (save before r0 clobbered)
+
+    ; Apply sign to step_int, set correction direction
+    moves r0, r9                ; check sign flag
+    bne _ws_negStep
+    nop
+    ; Positive direction: wh increases across columns
+    ; r7 already positive. Correction = +1
+    iwt r0, #1
+    sm ($0022), r0              ; correction = +1
+    bra _ws_stepDone
+    nop
+_ws_negStep:
+    ; Negative direction: wh decreases across columns
+    ; Negate step_int
+    from r7
+    not
+    inc r0
+    move r7, r0                 ; r7 = -step_int_unsigned (signed negative)
+    iwt r0, #$FFFF
+    sm ($0022), r0              ; correction = -1
+_ws_stepDone:
+    ; r6 = currentWH (= wh1), r7 = step_int (signed)
+    ; Initialize error accumulator
+    ibt r9, #0                  ; error = 0
+
+    ; === Set up column pointers: base + col1 ===
     move r1, r3
     iwt r0, #RAM_DRAWSTART
     with r1
@@ -812,78 +969,47 @@ _fd2ok:
     with r10
     add r0                      ; r10 = &colFilled[col1]
 
-    ; numCols = col2 - col1 + 1
-    move r0, r4
-    with r0
-    sub r3
-    inc r0
-    move r11, r0                ; r11 = iteration count
-
-    ; For depth interpolation: use r6 as current depth
-    ; (r6 = rotY1 = depth at col1, r7 = rotY2 = depth at col2)
-    ; Simple approach: just use r6 (depth at V1) for all columns
-    ; TODO: interpolate between r6 and r7
-
+    ; === FILL LOOP: write column data with Bresenham-stepped wall height ===
 _fill_loop:
     ldb (r10)                   ; r0 = colFilled[col]
-    add #0                      ; set flags (ldb doesn't!)
-    bne _fill_skip_long         ; already filled → skip
+    add #0                      ; set flags (ldb doesn't set them!)
+    bne _fill_skip              ; already filled → skip to step
     nop
 
-    ; Compute wallHeight = WALL_CONST / depth (r6)
-    ; Use repeated subtraction, capped at SCREEN_H
-    iwt r9, #WALL_CONST         ; r9 = 576 (numerator, r9 free here)
-    ibt r0, #0                  ; quotient
-_col_whdiv:
-    from r9
-    cmp r6                      ; 576_remaining >= depth?
-    blt _col_whdiv_done
+    ; --- Write column: drawStart, drawEnd, wallColor, mark filled ---
+    ; currentWH in r6 (may be negative from rounding)
+    moves r0, r6
+    bpl _wh_ok
     nop
-    with r9
-    sub r6                      ; 576_remaining -= depth
-    inc r0                      ; quotient++
-    iwt r3, #SCREEN_H
-    from r0
-    cmp r3
-    blt _col_whdiv
-    nop
-_col_whdiv_done:
-    ; r0 = wallHeight, clamp
-    iwt r3, #SCREEN_H
-    from r0
-    cmp r3
-    blt _col_whok
-    nop
-    move r0, r3
-_col_whok:
-    ; drawStart = HALF_H - wallHeight/2, drawEnd = HALF_H + wallHeight/2
-    lsr                         ; r0 = wallHeight/2
-    move r3, r0                 ; r3 = halfWall (temp)
+    ibt r0, #0                  ; clamp negative to 0
+_wh_ok:
+    ; r0 = wallHeight (>= 0)
+    lsr                         ; r0 = halfWall = wallHeight / 2
+    move r3, r0                 ; r3 = halfWall
+
+    ; drawStart = max(0, HALF_H - halfWall)
     iwt r0, #HALF_H
     with r0
-    sub r3                      ; r0 = drawStart = 72 - halfWall
-    moves r9, r0                ; r9 = drawStart (also sets flags)
-    bpl _col_dsok
+    sub r3                      ; r0 = 72 - halfWall
+    bpl _ds_ok
     nop
-    ibt r9, #0
-_col_dsok:
-    ; Store drawStart
-    from r9
-    stb (r1)
+    ibt r0, #0
+_ds_ok:
+    stb (r1)                    ; store drawStart[col]
 
-    ; drawEnd = HALF_H + halfWall
+    ; drawEnd = min(SCREEN_H-1, HALF_H + halfWall)
     iwt r0, #HALF_H
     with r0
     add r3                      ; r0 = 72 + halfWall
     iwt r3, #(SCREEN_H - 1)
     from r0
     cmp r3
-    blt _col_deok
-    beq _col_deok
+    blt _de_ok
+    beq _de_ok
     nop
     move r0, r3
-_col_deok:
-    stb (r2)                    ; drawEnd (r0)
+_de_ok:
+    stb (r2)                    ; store drawEnd[col]
 
     ; wallColor
     from r5
@@ -893,15 +1019,24 @@ _col_deok:
     ibt r0, #1
     stb (r10)
 
-    ; Restore r3 = col1 for pointer math (clobbered by halfWall)
-    ; Actually r3 was used as temp. But we don't need col1 anymore in the loop.
-    ; The pointers (r1,r2,r8,r10) are incremented, r11 is the counter.
-
-    bra _fill_next
+_fill_skip:
+    ; === Bresenham step (always, for filled and unfilled columns) ===
+    with r6
+    add r7                      ; currentWH += step_int (signed)
+    lm r0, ($001E)              ; step_err
+    with r9
+    add r0                      ; error += step_err
+    lm r0, ($0028)              ; numSteps
+    from r9
+    cmp r0                      ; error >= numSteps?
+    blt _fill_adv
     nop
-
-_fill_skip_long:
-_fill_next:
+    with r9
+    sub r0                      ; error -= numSteps
+    lm r0, ($0022)              ; correction (+1 or $FFFF=-1)
+    with r6
+    add r0                      ; currentWH += correction
+_fill_adv:
     inc r1
     inc r2
     inc r8
@@ -910,9 +1045,6 @@ _fill_next:
     sub #1
     bne _fill_loop
     nop
-
-    ; Restore r3 for _seg_next (it expects col-related state, but actually
-    ; _seg_next just loads from RAM so r3 doesn't matter)
 
 _seg_next:
     ; Advance to next seg
