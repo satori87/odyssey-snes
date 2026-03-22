@@ -694,8 +694,7 @@ _ds_ok:
     to r4
     add r8                   ; r4 = 48 + halfHeight
     ibt r0, #1
-    from r4
-    to r4
+    with r4
     sub r0                  ; r4 -= 1
     iwt r0, #143
     from r4
