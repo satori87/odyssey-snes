@@ -54,10 +54,16 @@
 .define BORDER_FLOOR     487       ; floor green tile
 .define BORDER_BLACK     488       ; black tile
 .define BORDER_WALL      489       ; wall brown tile
-; Viewport centering: 3 cols left + 27 viewport + 2 cols right = 32
-; 5 rows top + 18 viewport + 5 rows bottom = 28
-.define VP_LEFT          3         ; viewport starts at tile column 3
-.define VP_TOP           5         ; viewport starts at tile row 5
+.define BORDER_HUD       490       ; HUD yellow tile
+.define HUD_ROWS         4         ; 4 tile rows for status bar (32px, like Doom)
+; Doom layout: viewport at top, HUD space below
+; Hardware window masks display to 216px centered (pixels 20-235)
+; BG scroll positions viewport tiles to align with window
+.define VP_LEFT          0         ; viewport tiles at tilemap column 0
+.define VP_TOP           0         ; viewport at top of screen
+; Window edges (same as Doom: (256-216)/2 = 20)
+.define WIN_LEFT         20        ; window left edge pixel
+.define WIN_RIGHT        235       ; window right edge pixel (256-1-20)
 
 ;; -------------------------------------------------------
 ;; IRQTrampoline -- ROM entry point for IRQ vector
@@ -284,6 +290,43 @@ initMode3Display:
     lda #$01
     sta.l $212C          ; TM
 
+    ; === Doom-style hardware window (masks display to 216px centered) ===
+    ; Window 1 edges: left=20, right=235 (shows only pixels 20-235)
+    lda #WIN_LEFT
+    sta.l $2126          ; WH0 = window 1 left edge
+    lda #WIN_RIGHT
+    sta.l $2127          ; WH1 = window 1 right edge
+
+    ; Enable Window 1 for BG1, inverted
+    ; TMW disables BG1 where mask=1. Inverted: mask=1 OUTSIDE window.
+    ; Result: BG1 disabled outside window, visible inside (pixels 20-235)
+    lda #$03
+    sta.l $2123          ; W12SEL: BG1 Window 1 enabled + inverted
+
+    ; Apply window masking to BG1 on main screen
+    lda #$01
+    sta.l $212E          ; TMW: BG1 uses window
+
+    ; Window logic = OR (default)
+    lda #$00
+    sta.l $212A          ; WBGLOG
+    sta.l $212B          ; WOBJLOG
+
+    ; BG1 horizontal scroll: position tilemap so column 0 appears at pixel 20
+    ; Formula: screen_x = tilemap_x - BG_HOFS → BG_HOFS = -(WIN_LEFT) = 1004
+    lda #$EC
+    sta.l $210D          ; BG1HOFS low byte (1004 & $FF = $EC)
+    lda #$03
+    sta.l $210D          ; BG1HOFS high byte (1004 >> 8 = $03)
+
+    ; BG1 vertical scroll: center 176px (viewport+HUD) in 224px screen
+    ; Total = 18 viewport + 4 HUD = 22 rows = 176px (same as Doom)
+    ; Top border = (224-176)/2 = 24px. BG_VOFS = -(24) = 1024-24 = 1000 ($03E8)
+    lda #$E8
+    sta.l $210E          ; BG1VOFS low byte (1000 & $FF)
+    lda #$03
+    sta.l $210E          ; BG1VOFS high byte (1000 >> 8)
+
     ; VMAIN: increment after high byte write
     lda #$80
     sta.l $2115
@@ -339,46 +382,32 @@ initMode3Display:
     ldy #$0000           ; Y = row counter
     stz.b $00            ; column = 0
 @TM_Entry:
-    ; Top border (rows 0-4)?
-    cpy #VP_TOP
-    bcs @TM_NotTop
-    lda #BORDER_CEIL
-    sta.l $2118
-    bra @TM_Advance
-@TM_NotTop:
-    ; Bottom border (rows 23-27)?
-    cpy #VP_TOP + VIEW_ROWS  ; row >= 23?
-    bcs @TM_Bottom
-    ; In viewport row range. Check column.
+    ; Check if inside viewport area (rows 0-17, cols 0-26)
+    cpy #VP_TOP + VIEW_ROWS  ; row >= 18?
+    bcs @TM_CheckHUD
+    ; Viewport row. Check column.
     lda.b $00
-    cmp #VP_LEFT         ; col < 3? left border
-    bcc @TM_Side
-    cmp #VP_LEFT + VIEW_COLS  ; col >= 30? right border
-    bcs @TM_Side
+    cmp #VP_LEFT + VIEW_COLS  ; col >= 27?
+    bcs @TM_Black
     ; Viewport tile
     txa
     sta.l $2118
     inx
     bra @TM_Advance
-@TM_Side:
-    ; Match the 3 viewport bands: ceil (rows 5-10), wall (11-16), floor (17-22)
-    cpy #VP_TOP + VIEW_ROWS / 3  ; row >= 11? (past ceiling band)
-    bcs @TM_SideNotCeil
-    lda #BORDER_CEIL
+@TM_CheckHUD:
+    ; Check if inside HUD area (rows 18-21, cols 0-26)
+    cpy #VP_TOP + VIEW_ROWS + HUD_ROWS  ; row >= 22?
+    bcs @TM_Black
+    lda.b $00
+    cmp #VP_LEFT + VIEW_COLS  ; col >= 27?
+    bcs @TM_Black
+    ; HUD tile (yellow)
+    lda #BORDER_HUD
     sta.l $2118
     bra @TM_Advance
-@TM_SideNotCeil:
-    cpy #VP_TOP + VIEW_ROWS * 2 / 3  ; row >= 17? (past wall band)
-    bcs @TM_SideFloor
-    lda #BORDER_WALL
-    sta.l $2118
-    bra @TM_Advance
-@TM_SideFloor:
-    lda #BORDER_FLOOR
-    sta.l $2118
-    bra @TM_Advance
-@TM_Bottom:
-    lda #BORDER_FLOOR
+@TM_Black:
+    ; All borders are black (invisible)
+    lda #BORDER_BLACK
     sta.l $2118
 @TM_Advance:
     lda.b $00
@@ -588,6 +617,49 @@ initMode3Display:
     dey
     bne @BW_rest
 
+    ; --- Tile 490: HUD yellow (color 18, BP1+BP4=$FF) ---
+    ; Color 18 = %00010010 → BP1=$FF, BP4=$FF, rest $00
+    ldy #$0008
+@BH_01:
+    lda #$00             ; BP0
+    sta.l $2118
+    lda #$FF             ; BP1
+    sta.l $2119
+    dey
+    bne @BH_01
+    ldy #$0008
+@BH_23:
+    lda #$00
+    sta.l $2118
+    sta.l $2119
+    dey
+    bne @BH_23
+    ldy #$0008
+@BH_45:
+    lda #$FF             ; BP4
+    sta.l $2118
+    lda #$00             ; BP5
+    sta.l $2119
+    dey
+    bne @BH_45
+    ldy #$0008
+@BH_67:
+    lda #$00
+    sta.l $2118
+    sta.l $2119
+    dey
+    bne @BH_67
+
+    ; === Add yellow to palette at color 18 ===
+    sep #$20
+    lda #18
+    sta.l $2121          ; CGADD = 18
+    ; Yellow in BGR555: R=31, G=31, B=0 → %0000011111_11111 = $03FF
+    lda #$FF             ; low byte
+    sta.l $2122
+    lda #$03             ; high byte
+    sta.l $2122
+
     ; Screen on (will be controlled by IRQ after setupIRQ)
     lda #INIDISP_ON
     sta.l $2100
@@ -658,17 +730,14 @@ startGSU:
 @GSUStubEnd:
 
 ;; -------------------------------------------------------
-;; writePlayerState -- Copy 12 bytes of player state to $70:0000
+;; writePlayerState -- Copy player state to $70:0000
 ;;
-;; Player state layout in $70:0000 (all 8.8 fixed point):
-;;   $0000: posX    (2 bytes)
-;;   $0002: posY    (2 bytes)
-;;   $0004: dirX    (2 bytes)
-;;   $0006: dirY    (2 bytes)
-;;   $0008: planeX  (2 bytes)
-;;   $000A: planeY  (2 bytes)
+;; BSP player state layout:
+;;   $0000: ViewX       (2 bytes, world coordinates)
+;;   $0002: ViewY       (2 bytes, world coordinates)
+;;   $0004: ViewAngle   (2 bytes, low byte = angle 0-255)
 ;;
-;; Reads from C globals: posX, posY, dirX, dirY, planeX, planeY
+;; Reads from C globals: posX, posY, playerAngle
 ;; -------------------------------------------------------
 writePlayerState:
     php
@@ -681,31 +750,21 @@ writePlayerState:
 
     rep #$20
 
-    ; posX -> $70:0000
+    ; posX -> $70:0000 (ViewX)
     lda.l posX
     sta.l $700000
 
-    ; posY -> $70:0002
+    ; posY -> $70:0002 (ViewY)
     lda.l posY
     sta.l $700002
 
-    ; dirX -> $70:0004
-    lda.l dirX
-    sta.l $700004
-
-    ; dirY -> $70:0006
-    lda.l dirY
-    sta.l $700006
-
-    ; planeX -> $70:0008
-    lda.l planeX
-    sta.l $700008
-
-    ; planeY -> $70:000A
-    lda.l planeY
-    sta.l $70000A
-
     sep #$20
+
+    ; playerAngle -> $70:0004 (ViewAngle)
+    lda.l playerAngle
+    sta.l $700004
+    lda #$00
+    sta.l $700005        ; high byte = 0
 
     ; === Give GSU back RAM access ===
     lda #$1E

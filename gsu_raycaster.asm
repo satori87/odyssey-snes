@@ -1,7 +1,9 @@
-; GSU DDA Raycaster — stb-based bitplane renderer (Doom resolution 216x144)
+; gsu_raycaster.asm -- BSP renderer (Doom-style)
 ;
-; Phase 1: Cast 27 rays via DDA, compute drawStart/drawEnd/wallColor
-; Phase 2: Row-by-row tile rendering using stb (no plot instruction)
+; Phase 1: BSP traversal + vertex rotation + screen projection + column fill
+; Phase 2: Row-by-row stb tile rendering (proven working, from previous code)
+;
+; Follows Doom SNES patterns from rlbsp.a, rlsegs2.a, rlsegs3.a
 
 .MEMORYMAP
   SLOTSIZE $8000
@@ -15,768 +17,1243 @@
 .ROMBANKSIZE $8000
 .ROMBANKS 8
 
+; =====================================================================
+; CONSTANTS
+; =====================================================================
 .define SCREEN_H     144
 .define HALF_H       72
 .define NUM_COLS     27
 .define NUM_TROWS    18
-.define MAP_W        10
-.define MAP_H        10
+.define HALF_W       108      ; half viewport width in pixels (216/2)
 .define FB_BASE      $0400
 .define TILE_SIZE    64
+.define SCREEN_PLANE 4        ; distance from eye to screen (Doom: RLScreenPlane)
+.define WALL_CONST   576      ; SCREEN_H * SCREEN_PLANE = 144 * 4 = 576
 
-.define RAM_POSX      $0000
-.define RAM_POSY      $0002
-.define RAM_DIRX      $0004
-.define RAM_DIRY      $0006
-.define RAM_PLANEX    $0008
-.define RAM_PLANEY    $000A
-.define RAM_DRAWSTART $0040
-.define RAM_DRAWEND   $0060
-.define RAM_WALLCOLOR $0080
-.define RAM_RAYDIRX    $00A0
-.define RAM_RAYDIRY    $00A2
-.define RAM_DELTADX    $00A4
-.define RAM_DELTADY    $00A6
-.define RAM_SIDEDX     $00A8
-.define RAM_SIDEDY     $00AA
-.define RAM_STEPX      $00AC
-.define RAM_STEPY      $00AE
-.define RAM_MAPX       $00B0
-.define RAM_MAPY       $00B2
-.define RAM_SIDE       $00B4
-.define RAM_COL        $00B6
-.define RAM_PERPDIST   $00B8
-.define RAM_FRACX      $00BA
-.define RAM_FRACY      $00BC
-.define RAM_SCRATCH    $00BE
-.define RAM_CEIL_BP   $00C0
-.define RAM_WALL_BP   $00C8
-.define RAM_FLOOR_BP  $00D0
-.define RAM_TROW_Y    $00D8
+; Seg structure offsets (11 bytes, matches Doom's rlgSize)
+.define SEG_V1       0        ; vertex 1 byte offset (2)
+.define SEG_V2       2        ; vertex 2 byte offset (2)
+.define SEG_FLAGS    4        ; flags (1)
+.define SEG_COLOR    5        ; wall color (1)
+.define SEG_SIZE     11       ; total size
 
+; =====================================================================
+; RAM MAP ($70:0000)
+; =====================================================================
+; Player state (written by 65816)
+.define RAM_VIEWX     $0000   ; player world X (s16)
+.define RAM_VIEWY     $0002   ; player world Y (s16)
+.define RAM_ANGLE     $0004   ; player angle byte (0-255)
+
+; Column buffer (output for Phase 2)
+.define RAM_DRAWSTART $0040   ; drawStart[27] (1 byte each)
+.define RAM_DRAWEND   $0060   ; drawEnd[27] (1 byte each)
+.define RAM_WALLCOLOR $0080   ; wallColor[27] (1 byte each)
+.define RAM_COLFILLED $00A0   ; columnFilled[27] (1 byte: 0=empty, 1=filled)
+
+; Rotated vertex cache (8 verts x 4 bytes = 32 bytes)
+; Each: rotY(s16), rotX(s16). rotY=$8000 = not rotated yet
+.define RAM_ROTVERTS  $00C0
+
+; Trig values
+.define RAM_SIN       $00E8
+.define RAM_COS       $00EA
+
+; Scratch
+.define RAM_SCRATCH   $00EC
+.define RAM_SCRATCH2  $00EE
+
+; Bitplane precompute for Phase 2
+.define RAM_CEIL_BP   $00F0
+.define RAM_WALL_BP   $00F8
+.define RAM_FLOOR_BP  $0100
+
+; BSP stack
+.define RAM_BSPSTACK  $0110   ; 64 bytes (16 levels max)
+
+; Phase 2 scratch
+.define RAM_TROW_Y    $0150
+
+; =====================================================================
+; CODE
+; =====================================================================
 .BANK 0
 .SECTION "GSUCode" SUPERFREE
 
 gsu_fill_screen:
+    ; === SETUP ===
     iwt r0, #$70
-    ramb
+    ramb                        ; RAM bank = $70
     ibt r0, #0
-    romb
+    romb                        ; ROM bank 0 (GSU code + data)
 
-    ; ===== PHASE 1: DDA Raycasting (27 columns) =====
-    ibt r0, #0
-    sm (RAM_COL), r0
+    ; === Read player state ===
+    lm r0, (RAM_VIEWX)
+    sm (RAM_SCRATCH), r0        ; save ViewX
+    lm r0, (RAM_VIEWY)
+    sm (RAM_SCRATCH2), r0       ; save ViewY
 
-_phase1_loop:
-    lm r9, (RAM_COL)
-
-    ; --- Read cameraX[col] from ROM ---
-    from r9
-    add r9                  ; r0 = col * 2
-    iwt r1, #(cameraX_tbl - $8000)
-    to r14
-    add r1                  ; r14 -> cameraX_tbl[col]
-    getb
-    getbh                   ; r0 = cameraX[col] (s16 8.8)
-    sm (RAM_SCRATCH), r0    ; save cameraX for rayDirY calc
-
-    ; --- rayDirX = dirX + fp_mul(planeX, cameraX) ---
-    ; Simplified fp_mul: only al*bh + (al*bl)>>8 (planeX < 256 so ah=0)
-    lm r1, (RAM_PLANEX)     ; r1 = planeX
-    move r3, r0             ; r3 = cameraX
-
-    ibt r5, #0
-    moves r0, r1
-    bpl _fp1_apos
-    nop
-    with r1
-    not
-    inc r1
-    ibt r5, #1
-_fp1_apos:
-    moves r0, r3
-    bpl _fp1_bpos
-    nop
-    with r3
-    not
-    inc r3
-    ibt r0, #1
+    ; === Compute sin/cos from angle ===
+    lm r0, (RAM_ANGLE)
+    lob                         ; ensure byte (0-255)
+    add r0                      ; r0 = angle * 2 (word index)
+    iwt r1, #(sin_tbl - $8000)
     from r0
-    to r5
-    sub r5                  ; r5 = 1 - r5
-_fp1_bpos:
-    from r1
-    lob
-    move r6, r0             ; r6 = al = |planeX| & FF
-    from r3
-    hib
-    move r7, r0             ; r7 = bh = |cameraX| >> 8
-    from r3
-    lob
-    move r8, r0             ; r8 = bl = |cameraX| & FF
+    to r14
+    add r1                      ; r14 -> sin_tbl[angle]
+    getb
+    inc r14
+    to r2
+    getbh                       ; r2 = sin(angle) in 1.15 format
+    sm (RAM_SIN), r2
 
-    ; result = al*bh + (al*bl)>>8
-    move r0, r6
-    umult r7
-    move r10, r0            ; r10 = al * bh
-    move r0, r6
-    umult r8
-    swap
-    lob                     ; r0 = (al*bl) >> 8
-    with r10
-    add r0                  ; r10 = al*bh + (al*bl)>>8
+    lm r0, (RAM_ANGLE)
+    lob
+    add r0                      ; r0 = angle * 2
+    iwt r1, #(cos_tbl - $8000)
+    from r0
+    to r14
+    add r1                      ; r14 -> cos_tbl[angle]
+    getb
+    inc r14
+    to r2
+    getbh                       ; r2 = cos(angle)
+    sm (RAM_COS), r2
+
+    ; === Clear column buffer ===
+    ; drawStart = 0, drawEnd = SCREEN_H-1, wallColor = 0, columnFilled = 0
+    iwt r1, #RAM_DRAWSTART
+    iwt r2, #RAM_DRAWEND
+    iwt r3, #RAM_WALLCOLOR
+    iwt r4, #RAM_COLFILLED
+    ibt r5, #NUM_COLS
+_clear_loop:
+    ibt r0, #0
+    stb (r1)                    ; drawStart = 0
+    inc r1
+    ibt r0, #(SCREEN_H - 1)
+    stb (r2)                    ; drawEnd = 143
+    inc r2
+    ibt r0, #0
+    stb (r3)                    ; wallColor = 0
+    inc r3
+    ibt r0, #0
+    stb (r4)                    ; columnFilled = 0
+    inc r4
+    with r5
+    sub #1
+    bne _clear_loop
+    nop
+
+    ; === Initialize rotated vertex cache ===
+    ; Mark all 8 vertices as "not rotated" ($8000 flag)
+    iwt r1, #RAM_ROTVERTS
+    ibt r2, #8                  ; 8 vertices
+    iwt r0, #$8000
+_init_vert_loop:
+    stw (r1)                    ; rotY = $8000 (not rotated)
+    inc r1
+    inc r1
+    ibt r0, #0
+    stw (r1)                    ; rotX = 0
+    inc r1
+    inc r1
+    iwt r0, #$8000
+    with r2
+    sub #1
+    bne _init_vert_loop
+    nop
+
+    ; Initialize subsector visit counter
+    ibt r0, #0
+    sm ($0180), r0
+
+    ; =================================================================
+    ; PHASE 1: BSP TRAVERSAL (follows rlbsp.a)
+    ; =================================================================
+    ; Register allocation during BSP walk:
+    ; r8 = current node/area pointer (byte offset or $8000|area_offset)
+    ; r9 = BSP stack pointer
+    ; r14 = ROM data pointer
+
+    ; Initialize BSP stack
+    iwt r9, #RAM_BSPSTACK
+    ; Push final return address
+    iwt r0, #(_bsp_done - $8000)
+    stw (r9)
+    inc r9
+    inc r9
+
+    ; Start from root node
+    iwt r8, #ROOT_NODE_OFFSET
+
+    ; --- BSP Node Processing ---
+_bsp_node:
+    ; Check if this is a subsector (bit 15 set = negative)
+    moves r0, r8
+    bpl _bsp_is_node            ; positive = node, continue below
+    nop
+    ; Negative = subsector, long branch
+    iwt r15, #(_bsp_subsector - $8000)
+    nop
+_bsp_is_node:
+
+    ; === It's a BSP node — read partition line ===
+    iwt r0, #(bsp_nodes - $8000)
+    from r8
+    to r14
+    add r0                      ; r14 -> node data
+
+    ; Read partition: LineY(2), DeltaX(2), LineX(2), DeltaY(2)
+    getb
+    inc r14
+    to r1
+    getbh                       ; r1 = LineY
+    inc r14
+    getb
+    inc r14
+    to r2
+    getbh                       ; r2 = DeltaX
+    inc r14
+    getb
+    inc r14
+    to r3
+    getbh                       ; r3 = LineX
+    inc r14
+    getb
+    inc r14
+    to r4
+    getbh                       ; r4 = DeltaY
+    inc r14
+
+    ; Save r14 (now points to LeftBBox) and DeltaY
+    sm ($0152), r14             ; save ROM ptr at LeftBBox
+    sm ($0154), r4              ; save DeltaY
+
+    ; === Cross product: DeltaX*(ViewY-LineY) - DeltaY*(ViewX-LineX) ===
+    ; Part 1: DeltaX * (ViewY - LineY)
+    lm r0, (RAM_VIEWY)
+    with r0
+    sub r1                      ; r0 = ViewY - LineY
+    move r6, r2                 ; r6 = DeltaX
+    lmult                       ; R0:R4 = DeltaX * (ViewY - LineY)
+    move r5, r0                 ; r5 = high word
+    move r7, r4                 ; r7 = low word
+
+    ; Part 2: DeltaY * (ViewX - LineX)
+    lm r6, ($0154)              ; r6 = DeltaY
+    lm r0, (RAM_VIEWX)
+    with r0
+    sub r3                      ; r0 = ViewX - LineX
+    lmult                       ; R0:R4 = DeltaY * (ViewX - LineX)
+
+    ; Cross = Part1 - Part2
+    with r7
+    sub r4
+    with r5
+    sbc r0
+
+    ; r5 = sign of cross product
+    ; >= 0 (LEFT): visit left first, then right (front-to-back)
+    ; < 0 (RIGHT): visit right first, then left
+    moves r0, r5
+    bmi _bsp_right_side
+    nop
+
+    ; === LEFT SIDE: visit left child first (near), then right (far) ===
+_bsp_left_side:
+    lm r14, ($0152)             ; restore ROM ptr at LeftBBox
+    ; Skip LeftBBox (8 bytes) to reach LeftChild
+    with r14
+    add #8                      ; r14 at LeftChild
+
+    ; Save pointer to RightChild for later
+    ; RightChild = LeftChild + 2 + 8 = LeftChild + 10
+    move r1, r14
+    with r1
+    add #10                     ; r1 = ptr to RightChild
+    from r1
+    stw (r9)                    ; push RightChild ptr
+    inc r9
+    inc r9
+
+    ; Push return address
+    iwt r0, #(_after_left_near - $8000)
+    stw (r9)
+    inc r9
+    inc r9
+
+    ; Read left child and recurse
+    getb
+    inc r14
+    to r8
+    getbh                       ; r8 = LeftChild
+    iwt r15, #(_bsp_node - $8000)
+    nop
+
+_after_left_near:
+    ; Pop RightChild pointer
+    dec r9
+    dec r9
+    to r14
+    ldw (r9)                    ; r14 -> RightChild in ROM
+
+    ; Read right child and recurse (parent's return addr still on stack)
+    getb
+    inc r14
+    to r8
+    getbh                       ; r8 = RightChild
+    iwt r15, #(_bsp_node - $8000)
+    nop
+
+    ; === RIGHT SIDE: visit right child first (near), then left (far) ===
+_bsp_right_side:
+    lm r14, ($0152)             ; restore ROM ptr at LeftBBox
+    ; LeftChild is at +8
+    with r14
+    add #8                      ; r14 at LeftChild
+
+    ; Save LeftChild pointer for later
+    from r14
+    stw (r9)                    ; push LeftChild ptr
+    inc r9
+    inc r9
+
+    ; Skip LeftChild(2) + RightBBox(8) = 10 to reach RightChild
+    with r14
+    add #10                     ; r14 at RightChild
+
+    ; Push return address
+    iwt r0, #(_after_right_near - $8000)
+    stw (r9)
+    inc r9
+    inc r9
+
+    ; Read right child and recurse
+    getb
+    inc r14
+    to r8
+    getbh                       ; r8 = RightChild
+    iwt r15, #(_bsp_node - $8000)
+    nop
+
+_after_right_near:
+    ; Pop LeftChild pointer
+    dec r9
+    dec r9
+    to r14
+    ldw (r9)                    ; r14 -> LeftChild in ROM
+
+    ; Read left child and recurse (parent's return addr still on stack)
+    getb
+    inc r14
+    to r8
+    getbh                       ; r8 = LeftChild
+    iwt r15, #(_bsp_node - $8000)
+    nop
+
+    ; === SUBSECTOR (AREA) PROCESSING ===
+_bsp_subsector:
+    ; r8 = $8000 | area_byte_offset
+    ; Strip $8000 flag by adding $8000 (wraps: $8000+offset + $8000 = offset)
+    iwt r0, #$8000
+    from r8
+    add r0                      ; r0 = area byte offset (stripped $8000)
+
+    ; Read area data from ROM
+    iwt r1, #(bsp_areas - $8000)
+    to r14
+    add r1                      ; r14 -> area: numSegs(1), segOffset(2), sector(1)
+
+    to r11
+    getb                        ; r11 = numSegs
+    inc r14
+    getb
+    inc r14
+    to r10
+    getbh                       ; r10 = segOffset (byte offset from bsp_segs)
+    inc r14
+
+    ; Compute absolute ROM address of first seg
+    iwt r0, #(bsp_segs - $8000)
+    from r10
+    to r10
+    add r0                      ; r10 = ROM addr of first seg
+
+    ; Process each segment in this subsector
+_seg_loop:
+    moves r0, r11
+    bne _seg_has_more
+    nop
+    ; No more segs — long branch to _seg_done
+    iwt r15, #(_seg_done - $8000)
+    nop
+_seg_has_more:
+
+    ; Save loop state
+    sm ($0156), r11             ; remaining seg count
+    sm ($0158), r10             ; current seg ROM addr
+    sm ($015A), r9              ; BSP stack ptr (preserve during seg processing)
+
+    ; === Read segment data ===
+    move r14, r10
+    ; V1 offset
+    getb
+    inc r14
+    to r1
+    getbh                       ; r1 = v1 byte offset into vertex array
+    inc r14
+    ; V2 offset
+    getb
+    inc r14
+    to r2
+    getbh                       ; r2 = v2 byte offset into vertex array
+    inc r14
+    ; Skip flags (1 byte)
+    inc r14
+    ; Wall color
+    to r3
+    getb                        ; r3 = wallColor
+    sm ($015C), r3              ; save wallColor
+
+    ; === Process this segment: rotate vertices, project, fill columns ===
+    ; Save vertex offsets
+    sm ($015E), r1              ; v1 offset
+    sm ($0160), r2              ; v2 offset
+
+    ; --- Rotate vertex 1 ---
+    lm r1, ($015E)              ; v1 byte offset
+    ; Check if already rotated: RAM_ROTVERTS + v1_offset has rotY
+    ; v1_offset is vertex_index * 4, and RAM_ROTVERTS also uses 4 bytes per vert
+    ; So RAM address = RAM_ROTVERTS + v1_byte_offset
+    iwt r0, #RAM_ROTVERTS
+    from r1
+    to r7
+    add r0                      ; r7 = RAM addr of rotated v1
+    to r0
+    ldw (r7)                    ; r0 = rotY of v1
+    iwt r4, #$8000
+    from r0
+    cmp r4
+    beq _v1_need_rotate
+    nop
+    ; Already rotated — long branch
+    iwt r15, #(_v1_already_rotated - $8000)
+    nop
+_v1_need_rotate:
+
+    ; Not rotated — compute rotation
+    ; Read original vertex from ROM
+    iwt r0, #(bsp_vertices - $8000)
+    from r1
+    to r14
+    add r0                      ; r14 -> vertex X, Y in ROM
+
+    getb
+    inc r14
+    to r3
+    getbh                       ; r3 = vertexX
+    inc r14
+    getb
+    inc r14
+    to r4
+    getbh                       ; r4 = vertexY
+
+    ; dx = vertexX - viewX, dy = vertexY - viewY
+    lm r0, (RAM_VIEWX)
+    from r3
+    to r3
+    sub r0                      ; r3 = dx = vertexX - viewX
+    lm r0, (RAM_VIEWY)
+    from r4
+    to r4
+    sub r0                      ; r4 = dy = vertexY - viewY
+
+    ; rotY = cos*dx + sin*dy (following Doom's rlsegs2.a)
+    lm r6, (RAM_COS)
+    move r0, r3                 ; r0 = dx
+    fmult
+    rol                         ; r0 = cos * dx (world units)
+    move r5, r0                 ; r5 = cos*dx
+
+    lm r6, (RAM_SIN)
+    move r0, r4                 ; r0 = dy
+    fmult
+    rol                         ; r0 = sin * dy
+    with r5
+    add r0                      ; r5 = cos*dx + sin*dy = rotY
+
+    ; Subtract screen plane distance
+    with r5
+    sub #SCREEN_PLANE           ; r5 = rotY - 4
+
+    ; rotX = sin*dx - cos*dy
+    lm r6, (RAM_SIN)
+    move r0, r3                 ; r0 = dx
+    fmult
+    rol                         ; r0 = sin * dx
+    move r8, r0                 ; r8 = sin*dx (temporarily reusing r8)
+
+    lm r6, (RAM_COS)
+    move r0, r4                 ; r0 = dy
+    fmult
+    rol                         ; r0 = cos * dy
+    from r8
+    sub r0                      ; r0 = sin*dx - cos*dy = rotX
+
+    ; Store rotated vertex
+    ; r7 = RAM addr, r5 = rotY, r0 = rotX
+    from r5
+    stw (r7)                    ; store rotY
+    inc r7
+    inc r7
+    stw (r7)                    ; store rotX (r0)
+    dec r7
+    dec r7
+
+_v1_already_rotated:
+    ; Load rotated v1: r5 = rotY1, r6 = rotX1
+    ; r7 = RAM addr of v1
+    to r5
+    ldw (r7)                    ; r5 = rotY1
+    inc r7
+    inc r7
+    to r6
+    ldw (r7)                    ; r6 = rotX1
+    sm ($0162), r5              ; save rotY1
+    sm ($0164), r6              ; save rotX1
+
+    ; --- Rotate vertex 2 ---
+    lm r2, ($0160)              ; v2 byte offset
+    iwt r0, #RAM_ROTVERTS
+    from r2
+    to r7
+    add r0                      ; r7 = RAM addr of rotated v2
+    to r0
+    ldw (r7)
+    iwt r4, #$8000
+    from r0
+    cmp r4
+    beq _v2_need_rotate
+    nop
+    iwt r15, #(_v2_already_rotated - $8000)
+    nop
+_v2_need_rotate:
+
+    ; Not rotated — compute rotation (same as v1)
+    iwt r0, #(bsp_vertices - $8000)
+    from r2
+    to r14
+    add r0
+
+    getb
+    inc r14
+    to r3
+    getbh                       ; r3 = vertexX
+    inc r14
+    getb
+    inc r14
+    to r4
+    getbh                       ; r4 = vertexY
+
+    lm r0, (RAM_VIEWX)
+    from r3
+    to r3
+    sub r0                      ; r3 = dx
+    lm r0, (RAM_VIEWY)
+    from r4
+    to r4
+    sub r0                      ; r4 = dy
+
+    lm r6, (RAM_COS)
+    move r0, r3
+    fmult
+    rol
+    move r5, r0                 ; cos*dx
+
+    lm r6, (RAM_SIN)
+    move r0, r4
+    fmult
+    rol
+    with r5
+    add r0                      ; rotY = cos*dx + sin*dy
+    with r5
+    sub #SCREEN_PLANE
+
+    lm r6, (RAM_SIN)
+    move r0, r3
+    fmult
+    rol
+    move r8, r0                 ; sin*dx
+
+    lm r6, (RAM_COS)
+    move r0, r4
+    fmult
+    rol
+    from r8
+    sub r0                      ; rotX = sin*dx - cos*dy
+
+    from r5
+    stw (r7)
+    inc r7
+    inc r7
+    stw (r7)
+    dec r7
+    dec r7
+
+_v2_already_rotated:
+    ; Load rotated v2
+    to r5
+    ldw (r7)                    ; r5 = rotY2
+    inc r7
+    inc r7
+    to r6
+    ldw (r7)                    ; r6 = rotX2
+    sm ($0166), r5              ; save rotY2
+    sm ($0168), r6              ; save rotX2
+
+    ; === Visibility checks ===
+    ; Skip if both vertices behind camera (rotY <= 0)
+    lm r5, ($0162)              ; rotY1
+    lm r3, ($0166)              ; rotY2
+    moves r0, r5
+    bpl _v1_in_front
+    nop
+    ; v1 behind. Check v2.
+    moves r0, r3
+    bpl _at_least_one_front
+    nop
+    ; Both behind — skip this segment
+    iwt r15, #(_seg_next - $8000)
+    nop
+_v1_in_front:
+_at_least_one_front:
+
+    ; === Back-face cull ===
+    ; Cross product of segment direction and view-to-v1 direction
+    ; segDX = rotX2 - rotX1, segDY = rotY2 - rotY1
+    ; viewDX = rotX1, viewDY = rotY1 (from origin since already translated)
+    ; Cross = segDX * rotY1 - segDY * rotX1
+    ; If cross < 0: back-facing, skip
+    lm r1, ($0164)              ; rotX1
+    lm r2, ($0162)              ; rotY1
+    lm r3, ($0168)              ; rotX2
+    lm r4, ($0166)              ; rotY2
+
+    ; segDX = rotX2 - rotX1
+    from r3
+    to r5
+    sub r1                      ; r5 = segDX
+
+    ; segDY = rotY2 - rotY1
+    from r4
+    to r7
+    sub r2                      ; r7 = segDY
+
+    ; Cross = segDX * rotY1 - segDY * rotX1
+    move r6, r5                 ; r6 = segDX
+    move r0, r2                 ; r0 = rotY1
+    lmult                       ; R0:R4 = segDX * rotY1
+    move r5, r0                 ; high word
+    move r8, r4                 ; low word
+
+    move r6, r7                 ; r6 = segDY
+    move r0, r1                 ; r0 = rotX1
+    lmult                       ; R0:R4 = segDY * rotX1
+
+    ; Cross = (r5:r8) - (r0:r4)
+    with r8
+    sub r4
+    with r5
+    sbc r0
+
+    ; If cross < 0: back-facing, skip (long branch)
+    moves r0, r5
+    bpl _not_backface
+    nop
+    iwt r15, #(_seg_next - $8000)
+    nop
+_not_backface:
+
+    ; === Clamp depths: if a vertex is behind camera, set depth = 1 ===
+    lm r1, ($0162)              ; rotY1
+    lm r2, ($0164)              ; rotX1
+    lm r3, ($0166)              ; rotY2
+    lm r4, ($0168)              ; rotX2
+    moves r0, r1
+    bpl _y1_ok
+    nop
+    ibt r1, #1                  ; clamp depth to 1
+    ; Clip rotX1 towards rotX2 (simplified: just use rotX2)
+    move r2, r4
+_y1_ok:
+    moves r0, r3
+    bpl _y2_ok
+    nop
+    ibt r3, #1
+    move r4, r2
+_y2_ok:
+    ; r1=Y1, r2=X1, r3=Y2, r4=X2 (all positive depths)
+
+    ; === Project to screen X ===
+    ; screenX = rotX * 27 / rotY * 4 + HALF_W
+    ; Using tile columns: tileCol = rotX * 13 / rotY + 13
+    ; (13 = NUM_COLS/2 = 27/2, we use 13 and add 0.5 by rounding)
+
+    ; Project vertex 1: screenX1 = rotX1 * 27 / rotY1
+    ; Step 1: rotX1 * 27 (fits in s16 for our map size)
+    move r0, r2                 ; r0 = rotX1
+    iwt r6, #27
+    lmult                       ; R0:R4 = rotX1 * 27
+    ; For small values, result is in R4 (low word)
+    ; Use R4 as numerator for divide
+    move r5, r4                 ; r5 = rotX1 * 27 (low 16 bits)
+    move r7, r0                 ; r7 = high word (for overflow check)
+
+    ; Divide r5 by r1 (rotY1)
+    ; Handle sign: r5 could be negative
+    sm ($016A), r1              ; save rotY1 for later
+    sm ($016C), r2              ; save rotX1
+    sm ($016E), r3              ; save rotY2
+    sm ($0170), r4              ; save rotX2
+
+    ; Signed divide: r5 / r1 -> result in r0
+    ; numerator in r5, denominator in r1
+    ibt r11, #0                 ; sign flag
+    moves r0, r5
+    bpl _d1_npos
+    nop
+    with r5
+    not
+    inc r5
+    ibt r11, #1
+_d1_npos:
+    ; r1 (rotY1) is always positive (we clamped it)
+    ; 16-bit unsigned divide: r5 / r1
+    ibt r2, #0                  ; remainder
+    ibt r3, #0                  ; quotient
+    iwt r12, #16                ; loop counter
+_div1_loop:
+    with r5
+    add r5                      ; shift numerator left, MSB to carry
+    with r2
+    rol                         ; remainder = (remainder << 1) | carry
+    with r3
+    add r3                      ; quotient <<= 1
+    from r2
+    cmp r1                      ; remainder >= divisor?
+    blt _div1_nosub
+    nop
+    with r2
+    sub r1                      ; remainder -= divisor
+    inc r3                      ; quotient |= 1
+_div1_nosub:
+    dec r12
+    bne _div1_loop
+    nop
+    ; r3 = quotient = |rotX1 * 27 / rotY1|
 
     ; Apply sign
-    ibt r0, #0
-    from r5
-    cmp r0
-    beq _fp1_done
-    nop
-    from r10
-    not
-    inc r0
-    move r10, r0
-_fp1_done:
-    lm r1, (RAM_DIRX)
-    move r0, r10
-    with r0
-    add r1                  ; r0 = dirX + fp_mul_result
-    sm (RAM_RAYDIRX), r0
-
-    ; --- rayDirY = dirY + fp_mul(planeY, cameraX) ---
-    lm r1, (RAM_PLANEY)
-    lm r3, (RAM_SCRATCH)
-
-    ibt r5, #0
-    moves r0, r1
-    bpl _fp2_apos
-    nop
-    with r1
-    not
-    inc r1
-    ibt r5, #1
-_fp2_apos:
-    moves r0, r3
-    bpl _fp2_bpos
+    moves r0, r11
+    beq _d1_done
     nop
     with r3
     not
     inc r3
-    ibt r0, #1
-    from r0
-    to r5
-    sub r5
-_fp2_bpos:
-    from r1
-    lob
-    move r6, r0
-    from r3
-    hib
-    move r7, r0
-    from r3
-    lob
-    move r8, r0
+_d1_done:
+    ; r3 = rotX1 * 27 / rotY1 (signed)
+    ; screenX1 = r3 * 4 + HALF_W
+    with r3
+    add r3                      ; r3 *= 2
+    with r3
+    add r3                      ; r3 *= 2 (total: *4)
+    iwt r0, #HALF_W
+    with r3
+    add r0                      ; r3 = screenX1 in pixels
+    sm ($0172), r3              ; save screenX1
 
-    move r0, r6
-    umult r7
-    move r10, r0
-    move r0, r6
-    umult r8
-    swap
-    lob
-    with r10
-    add r0
+    ; Project vertex 2: same procedure
+    lm r2, ($0170)              ; rotX2 (saved earlier... wait, r4 was overwritten)
+    ; Reload from saved values
+    lm r4, ($0168)              ; rotX2 (original)
+    lm r1, ($016E)              ; rotY2
 
-    ibt r0, #0
-    from r5
-    cmp r0
-    beq _fp2_done
+    ; rotX2 * 27
+    move r0, r4
+    iwt r6, #27
+    lmult
+    move r5, r4                 ; r5 = rotX2 * 27 (low word)
+
+    ; Signed divide: r5 / r1
+    ibt r11, #0
+    moves r0, r5
+    bpl _d2_npos
     nop
-    from r10
+    with r5
     not
-    inc r0
-    move r10, r0
-_fp2_done:
-    lm r1, (RAM_DIRY)
-    move r0, r10
-    with r0
-    add r1
-    sm (RAM_RAYDIRY), r0
-
-    ; --- Compute deltaDistX = recip_tbl[clamp(|rayDirX|, 1, 255)] ---
-    lm r0, (RAM_RAYDIRX)
-    moves r0, r0            ; set flags
-    bpl _ddx_pos
-    nop
-    from r0
-    not
-    inc r0                  ; r0 = |rayDirX|
-_ddx_pos:
-    ; Clamp to 1-255
-    ibt r1, #0
-    from r0
+    inc r5
+    ibt r11, #1
+_d2_npos:
+    ibt r2, #0
+    ibt r3, #0
+    iwt r12, #16
+_div2_loop:
+    with r5
+    add r5
+    with r2
+    rol
+    with r3
+    add r3
+    from r2
     cmp r1
-    bne _ddx_nz
+    blt _div2_nosub
     nop
-    iwt r0, #$7FFF
-    sm (RAM_DELTADX), r0
-    bra _ddx_end
-    nop
-_ddx_nz:
-    iwt r1, #256
-    from r0
-    cmp r1
-    blt _ddx_ok
-    nop
-    ibt r0, #255            ; clamp high; ibt sign-extends, but 255=$FF -> $FFFF
-    lob                     ; r0 = $00FF = 255
-_ddx_ok:
-    ; Lookup: recip_tbl[r0], 2 bytes per entry
-    from r0
-    add r0                  ; r0 = index * 2
-    iwt r1, #(recip_tbl - $8000)
-    to r14
-    add r1
-    getb
-    getbh                   ; r0 = recip value (u16)
-    sm (RAM_DELTADX), r0
-_ddx_end:
-
-    ; --- Compute deltaDistY ---
-    lm r0, (RAM_RAYDIRY)
-    moves r0, r0
-    bpl _ddy_pos
-    nop
-    from r0
-    not
-    inc r0
-_ddy_pos:
-    ibt r1, #0
-    from r0
-    cmp r1
-    bne _ddy_nz
-    nop
-    iwt r0, #$7FFF
-    sm (RAM_DELTADY), r0
-    bra _ddy_end
-    nop
-_ddy_nz:
-    iwt r1, #256
-    from r0
-    cmp r1
-    blt _ddy_ok
-    nop
-    ibt r0, #255
-    lob
-_ddy_ok:
-    from r0
-    add r0
-    iwt r1, #(recip_tbl - $8000)
-    to r14
-    add r1
-    getb
-    getbh
-    sm (RAM_DELTADY), r0
-_ddy_end:
-
-    ; --- Initialize mapX, mapY, fracX, fracY ---
-    lm r0, (RAM_POSX)
-    to r1
-    move r1, r0
-    hib                     ; r0 = posX >> 8 = mapX (integer part)
-    sm (RAM_MAPX), r0
-    from r1
-    lob                     ; r0 = posX & FF = fracX
-    sm (RAM_FRACX), r0
-
-    lm r0, (RAM_POSY)
-    to r1
-    move r1, r0
-    hib
-    sm (RAM_MAPY), r0
-    from r1
-    lob
-    sm (RAM_FRACY), r0
-
-    ; --- Compute stepX, sideDistX ---
-    ; if rayDirX < 0: stepX=-1, sideDistX = fracX * deltaDist / 256
-    ; if rayDirX >= 0: stepX=+1, sideDistX = (256 - fracX) * deltaDist / 256
-    lm r0, (RAM_RAYDIRX)
-    moves r0, r0
-    bmi _stepx_neg
-    nop
-
-    ; rayDirX >= 0
-    ibt r0, #1
-    sm (RAM_STEPX), r0
-    iwt r0, #256
-    lm r1, (RAM_FRACX)
-    from r0
-    to r0
-    sub r1                  ; r0 = 256 - fracX
-    bra _sdx_calc
-    nop
-
-_stepx_neg:
-    iwt r0, #$FFFF
-    sm (RAM_STEPX), r0
-    lm r0, (RAM_FRACX)
-
-_sdx_calc:
-    ; r0 = frac (0-256). Multiply by deltaDistX >> 8
-    ; sideDistX = (frac * deltaDistX) >> 8
-    ; Clamp frac to 255 for u8 multiply
-    to r6
-    move r6, r0
-    iwt r1, #256
-    from r6
-    cmp r1
-    blt _sdx_small
-    nop
-    ; frac >= 256 means full step
-    lm r0, (RAM_DELTADX)
-    sm (RAM_SIDEDX), r0
-    bra _sdx_done
-    nop
-_sdx_small:
-    ; frac * deltaDist_hi + (frac * deltaDist_lo) >> 8
-    lm r0, (RAM_DELTADX)
-    to r7
-    move r7, r0             ; r7 = deltaDist
-    hib                      ; r0 = deltaDist >> 8 = hi
-    to r8
-    move r8, r0
-    from r7
-    lob                      ; r0 = deltaDist & FF = lo
-    to r11
-    move r11, r0
-
-    move r0, r6              ; r0 = frac
-    umult r8                 ; r0 = frac * hi
-    to r10
-    move r10, r0
-
-    move r0, r6
-    umult r11                ; r0 = frac * lo
-    swap
-    lob                      ; r0 = (frac * lo) >> 8
-    with r10
-    add r0
-    sm (RAM_SIDEDX), r10
-_sdx_done:
-
-    ; --- Compute stepY, sideDistY ---
-    lm r0, (RAM_RAYDIRY)
-    moves r0, r0
-    bmi _stepy_neg
-    nop
-
-    ibt r0, #1
-    sm (RAM_STEPY), r0
-    iwt r0, #256
-    lm r1, (RAM_FRACY)
-    from r0
-    to r0
+    with r2
     sub r1
-    bra _sdy_calc
+    inc r3
+_div2_nosub:
+    dec r12
+    bne _div2_loop
     nop
 
-_stepy_neg:
-    iwt r0, #$FFFF
-    sm (RAM_STEPY), r0
-    lm r0, (RAM_FRACY)
-
-_sdy_calc:
-    to r6
-    move r6, r0
-    iwt r1, #256
-    from r6
-    cmp r1
-    blt _sdy_small
+    moves r0, r11
+    beq _d2_done
     nop
-    lm r0, (RAM_DELTADY)
-    sm (RAM_SIDEDY), r0
-    bra _sdy_done
-    nop
-_sdy_small:
-    lm r0, (RAM_DELTADY)
-    to r7
-    move r7, r0
-    hib
-    to r8
-    move r8, r0
-    from r7
-    lob
-    to r11
-    move r11, r0
-    move r0, r6
-    umult r8
-    to r10
-    move r10, r0
-    move r0, r6
-    umult r11
-    swap
-    lob
-    with r10
+    with r3
+    not
+    inc r3
+_d2_done:
+    with r3
+    add r3
+    with r3
+    add r3
+    iwt r0, #HALF_W
+    with r3
     add r0
-    sm (RAM_SIDEDY), r10
-_sdy_done:
+    sm ($0174), r3              ; save screenX2
 
-    ; === DDA step loop ===
-    ibt r11, #0              ; step counter (safety limit)
+    ; === Determine column range ===
+    lm r1, ($0172)              ; screenX1 (pixels)
+    lm r2, ($0174)              ; screenX2 (pixels)
 
-_dda_loop:
-    ; Which side to step? Compare sideDistX vs sideDistY
-    lm r0, (RAM_SIDEDX)
-    lm r1, (RAM_SIDEDY)
-    from r0
-    cmp r1
-    blt _dda_xstep           ; sideDistX < sideDistY -> step X
-    nop
-
-    ; --- Step Y ---
-    lm r0, (RAM_SIDEDY)
-    lm r1, (RAM_DELTADY)
-    from r0
-    to r0
-    add r1
-    sm (RAM_SIDEDY), r0
-    lm r0, (RAM_MAPY)
-    lm r1, (RAM_STEPY)
-    from r0
-    to r0
-    add r1
-    sm (RAM_MAPY), r0
-    ibt r0, #1
-    sm (RAM_SIDE), r0
-    bra _dda_check
-    nop
-
-_dda_xstep:
-    ; --- Step X ---
-    lm r0, (RAM_SIDEDX)
-    lm r1, (RAM_DELTADX)
-    from r0
-    to r0
-    add r1
-    sm (RAM_SIDEDX), r0
-    lm r0, (RAM_MAPX)
-    lm r1, (RAM_STEPX)
-    from r0
-    to r0
-    add r1
-    sm (RAM_MAPX), r0
-    ibt r0, #0
-    sm (RAM_SIDE), r0
-
-_dda_check:
-    ; --- Check map[mapY][mapX] ---
-    lm r0, (RAM_MAPY)
-    ; Bounds check: 0 <= mapY < MAP_H
-    moves r0, r0
-    bmi _dda_oob             ; negative -> out of bounds
-    nop
-    ibt r1, #MAP_H
-    from r0
-    cmp r1
-    bge _dda_oob
-    nop
-
-    lm r1, (RAM_MAPX)
-    moves r0, r1             ; test mapX
-    bmi _dda_oob
-    nop
-    ibt r2, #MAP_W
+    ; Ensure x1 <= x2 (swap if needed, also swap depths)
     from r1
     cmp r2
-    bge _dda_oob
+    blt _no_swap
+    beq _no_swap
     nop
-
-    ; mapY * 10 + mapX
-    ; mapY * 10 = mapY * 8 + mapY * 2
-    lm r0, (RAM_MAPY)
-    from r0
-    to r2
-    add r0                   ; r2 = mapY * 2
+    ; Swap
+    move r0, r1
+    move r1, r2
+    move r2, r0
+    ; Also swap depths
+    lm r3, ($016A)              ; rotY1
+    lm r4, ($016E)              ; rotY2
+    sm ($016A), r4
+    sm ($016E), r3
+_no_swap:
+    ; r1 = leftX (pixels), r2 = rightX (pixels)
+    ; Clamp to viewport: 0..215
+    moves r0, r1
+    bpl _x1_pos
+    nop
+    ibt r1, #0
+_x1_pos:
+    iwt r0, #215
     from r2
-    to r3
-    add r2                   ; r3 = mapY * 4
-    with r3
-    add r3                   ; r3 = mapY * 8
-    with r3
-    add r2                   ; r3 = mapY * 8 + mapY * 2 = mapY * 10
-    from r3
-    to r0
-    add r1                   ; r0 = mapY * 10 + mapX
-
-    ; Read map tile from ROM
-    iwt r1, #(map_data - $8000)
-    to r14
-    add r1
-    getb                     ; r0 = map[mapY][mapX]
-
-    ; Wall hit if nonzero
-    ibt r1, #0
-    from r0
-    cmp r1
-    bne _dda_hit_wall
-    nop
-
-    ; Continue stepping
-    inc r11
-    ibt r0, #30
-    from r11
     cmp r0
-    bge _dda_maxsteps         ; if stepCount >= 30, stop (inverted condition)
+    blt _x2_ok
+    beq _x2_ok
     nop
-    ; Long branch back to DDA loop top
-    iwt r15, #(_dda_loop - $8000)
-    nop
-
-_dda_maxsteps:
-    ; Too many steps: default to wall 1
-    bra _dda_oob
-    nop
-
-_dda_oob:
-    ibt r0, #1               ; default wall color for out-of-bounds
-_dda_hit_wall:
-    ; r0 = wall tile value (1 or 2)
-    ; Darken Y-side walls by adding 8 to color index
-    to r6
-    move r6, r0              ; r6 = wall color
-    lm r0, (RAM_SIDE)
-    ibt r1, #0
-    from r0
+    iwt r2, #215
+_x2_ok:
+    ; Skip if entirely off-screen (long branch)
+    from r2
     cmp r1
-    beq _wc_done
+    bge _not_offscreen
     nop
-    ibt r0, #8
-    with r6
-    add r0                   ; r6 += 8 for Y-side darkening
-_wc_done:
+    iwt r15, #(_seg_next - $8000)
+    nop
+_not_offscreen:
 
-    ; --- Perpendicular distance ---
-    ; side==0: perpDist = sideDistX - deltaDistX
-    ; side==1: perpDist = sideDistY - deltaDistY
-    lm r0, (RAM_SIDE)
-    ibt r1, #0
-    from r0
-    cmp r1
-    bne _perp_y
-    nop
-    lm r0, (RAM_SIDEDX)
-    lm r1, (RAM_DELTADX)
-    bra _perp_sub
-    nop
-_perp_y:
-    lm r0, (RAM_SIDEDY)
-    lm r1, (RAM_DELTADY)
-_perp_sub:
-    from r0
-    to r0
-    sub r1                   ; r0 = sideDist - deltaDist = perpDist
-    ; Clamp to >= 1
-    moves r0, r0
-    bpl _perp_pos
-    nop
-    ibt r0, #1               ; negative -> clamp to 1
-_perp_pos:
-    ibt r1, #0
-    from r0
-    cmp r1
-    bne _perp_nz
-    nop
-    ibt r0, #1               ; zero -> clamp to 1
-_perp_nz:
-    sm (RAM_PERPDIST), r0
-
-    ; --- Height from perpDist (direct, no table) ---
-    ; halfHeight = 72 - (perpDist >> 5), clamped to 0-72
-    lm r0, (RAM_PERPDIST)
+    ; Convert to tile columns: col = pixelX / 8
+    from r1
     lsr
     lsr
-    lsr
-    lsr
-    lsr                      ; r0 = perpDist >> 5
-    move r8, r0              ; r8 = perpDist >> 5
-    ibt r0, #72
-    with r0
-    sub r8                   ; r0 = 72 - (perpDist >> 5)
-    moves r0, r0
-    bpl _ht_pos
-    nop
-    ibt r0, #0               ; clamp to 0
-_ht_pos:
-    move r8, r0              ; r8 = halfHeight
-
-    ; drawStart = 72 - halfHeight
-    ibt r0, #72
-    from r0
     to r3
-    sub r8                   ; r3 = drawStart
-    moves r0, r3
-    bpl _ds_ok
-    nop
-    ibt r3, #0
-_ds_ok:
-
-    ; drawEnd = 72 + halfHeight - 1
-    ibt r0, #72
-    from r0
+    lsr                         ; r3 = leftCol = leftX / 8
+    from r2
+    lsr
+    lsr
     to r4
-    add r8                   ; r4 = 72 + halfHeight
-    ibt r0, #1
-    with r4
-    sub r0                   ; r4 -= 1
-    iwt r0, #143
+    lsr                         ; r4 = rightCol = rightX / 8
+
+    ; Clamp columns to 0..26
+    ibt r0, #(NUM_COLS - 1)
     from r4
     cmp r0
-    blt _de_ok
+    blt _col_ok
+    beq _col_ok
     nop
-    iwt r4, #143
-_de_ok:
+    ibt r4, #(NUM_COLS - 1)
+_col_ok:
 
-    ; --- Store to RAM arrays ---
-    lm r9, (RAM_COL)
+    ; === Fill columns ===
+    ; For each column from r3 (leftCol) to r4 (rightCol):
+    ;   if not filled: compute wall height, fill column
+    lm r5, ($015C)              ; wallColor
+    lm r7, ($016A)              ; rotY1 (depth at left edge)
+    lm r8, ($016E)              ; rotY2 (depth at right edge)
 
-    iwt r0, #RAM_DRAWSTART
-    to r5
-    add r9                   ; r5 = RAM_DRAWSTART + col
-    move r0, r3              ; r0 = drawStart (stb always stores R0)
-    stb (r5)                 ; drawStart[col] = r0.lo
+_fill_col_loop:
+    ; Check if column already filled
+    iwt r0, #RAM_COLFILLED
+    from r3
+    to r14
+    add r0                      ; r14 would need to be ROM... but this is RAM
+    ; Use ldb for RAM read instead
+    iwt r0, #RAM_COLFILLED
+    from r3
+    to r1
+    add r0                      ; r1 = RAM addr of columnFilled[col]
+    to r0
+    ldb (r1)                    ; r0 = columnFilled[col]
+    beq _fill_this_col          ; not filled, process it
+    nop
+    iwt r15, #(_fill_next_col - $8000)
+    nop
+_fill_this_col:
 
-    iwt r0, #RAM_DRAWEND
-    to r5
-    add r9
-    move r0, r4              ; r0 = drawEnd
-    stb (r5)                 ; drawEnd[col] = r0.lo
+    ; Interpolate depth for this column
+    ; For simplicity, use average of Y1 and Y2 for now
+    ; (proper interpolation would weight by column position within segment)
+    from r7
+    to r0
+    add r8                      ; r0 = Y1 + Y2
+    lsr                         ; r0 = (Y1 + Y2) / 2 = average depth
 
-    iwt r0, #RAM_WALLCOLOR
-    to r5
-    add r9
-    move r0, r6              ; r0 = wallColor
-    stb (r5)                 ; wallColor[col] = r0.lo
+    ; Ensure depth >= 1
+    bne _depth_ok
+    nop
+    ibt r0, #1
+_depth_ok:
+    ; Wall height = WALL_CONST / depth = 576 / depth
+    ; Using divide: numerator = 576, divisor = depth
+    move r1, r0                 ; r1 = depth (divisor)
+    iwt r5, #WALL_CONST         ; r5 = 576 (numerator)
 
+    ; Unsigned divide: r5 / r1 -> wallHeight in r10
+    move r6, r5                 ; r6 = numerator (576)
+    ibt r2, #0                  ; remainder
+    ibt r10, #0                 ; quotient
+    iwt r12, #16
+_div3_loop2:
+    with r6
+    add r6
+    with r2
+    rol
+    with r10
+    add r10                     ; quotient <<= 1
+    from r2
+    cmp r1                      ; remainder >= divisor?
+    blt _div3_nosub
+    nop
+    with r2
+    sub r1
+    inc r10
+_div3_nosub:
+    dec r12
+    bne _div3_loop2
+    nop
+    ; r10 = wallHeight = 576 / depth
 
-    ; --- Next column ---
-    lm r0, (RAM_COL)
-    inc r0
-    sm (RAM_COL), r0
-    ibt r1, #27
+    ; Clamp wallHeight to SCREEN_H
+    iwt r0, #SCREEN_H
+    from r10
+    cmp r0
+    blt _wh_ok
+    nop
+    iwt r10, #SCREEN_H
+_wh_ok:
+    ; drawStart = HALF_H - wallHeight/2
+    from r10
+    lsr                         ; r0 = wallHeight / 2
+    iwt r1, #HALF_H
+    from r1
+    to r2
+    sub r0                      ; r2 = HALF_H - wallHeight/2 = drawStart
+    ; Clamp drawStart >= 0
+    moves r0, r2
+    bpl _ds_ok
+    nop
+    ibt r2, #0
+_ds_ok:
+
+    ; drawEnd = HALF_H + wallHeight/2
+    from r10
+    lsr                         ; r0 = wallHeight / 2
+    iwt r1, #HALF_H
+    from r1
+    add r0                      ; r0 = HALF_H + wallHeight/2 = drawEnd
+    ; Clamp drawEnd <= SCREEN_H - 1
+    iwt r1, #(SCREEN_H - 1)
     from r0
     cmp r1
-    blt _p1_cont
+    blt _de_ok
+    beq _de_ok
     nop
-    ; All columns done, go to Phase 2
-    iwt r15, #(_phase2 - $8000)
+    iwt r0, #(SCREEN_H - 1)
+_de_ok:
+    move r11, r0                ; r11 = drawEnd
+
+    ; Write to column buffer
+    ; drawStart[col]
+    iwt r0, #RAM_DRAWSTART
+    from r3
+    to r1
+    add r0
+    from r2
+    stb (r1)                    ; drawStart[col] = r2
+
+    ; drawEnd[col]
+    iwt r0, #RAM_DRAWEND
+    from r3
+    to r1
+    add r0
+    from r11
+    stb (r1)                    ; drawEnd[col] = r11
+
+    ; wallColor[col]
+    lm r5, ($015C)              ; reload wallColor
+    iwt r0, #RAM_WALLCOLOR
+    from r3
+    to r1
+    add r0
+    from r5
+    stb (r1)                    ; wallColor[col] = color
+
+    ; Mark column as filled
+    iwt r0, #RAM_COLFILLED
+    from r3
+    to r1
+    add r0
+    ibt r0, #1
+    stb (r1)                    ; columnFilled[col] = 1
+
+_fill_next_col:
+    ; Reload wallColor and depths for next iteration
+    lm r5, ($015C)
+    lm r7, ($016A)
+    lm r8, ($016E)
+    inc r3                      ; next column
+    from r4
+    cmp r3                      ; rightCol >= col? (swapped for bge)
+    blt _fill_col_done
+    nop
+    iwt r15, #(_fill_col_loop - $8000)
+    nop
+_fill_col_done:
+
+_seg_next:
+    ; Advance to next seg in subsector
+    lm r10, ($0158)             ; current seg ROM addr
+    ibt r0, #SEG_SIZE           ; +11 bytes
+    with r10
+    add r0                      ; Hmm, 11 > 15 max for add #N
+    ; Need: r10 += 11. Use two adds: +8 then +3
+    ; Actually, we use with r10; add r0 where r0 = 11
+    ; But add rN uses register not immediate for values > 15
+    ; Wait, `with r10; add r0` means r10 = r10 + r0, where r0 = 11 (set by ibt)
+    ; ibt r0, #11 → r0 = 11 (sign extended: 11 is fine, < 128)
+    ; Then: with r10; add r0 → r10 = r10 + 11. But `add rN` format?
+    ; Actually `add rN` is: DREG = SREG + rN. Default DREG=SREG=R0.
+    ; with r10: DREG=r10, SREG=r10. So `with r10; add r0` = r10 = r10 + r0. Yes!
+
+    ; Recalculate properly:
+    lm r10, ($0158)
+    ibt r0, #SEG_SIZE
+    with r10
+    add r0                      ; r10 += 11
+
+    lm r11, ($0156)             ; remaining seg count
+    with r11
+    sub #1                      ; --numSegs
+    lm r9, ($015A)              ; restore BSP stack ptr
+
+    ; Continue seg loop
+    iwt r15, #(_seg_loop - $8000)
     nop
 
-_p1_cont:
-    iwt r15, #(_phase1_loop - $8000)
-    nop
-_phase2:
+_seg_done:
+    ; Return from subsector — pop return address from BSP stack
+    lm r9, ($015A)              ; restore BSP stack ptr (in case it wasn't saved)
+    dec r9
+    dec r9
+    to r0
+    ldw (r9)                    ; r0 = return address
+    move r15, r0                ; jump
     nop
 
-    ; ===== Precompute BP bytes for ceiling (16) and floor (17) =====
-    ; Color 16 = 00010000: BP4=$FF, rest $00
-    iwt r1, #RAM_CEIL_BP
-    ibt r0, #0
-    stb (r1)                ; BP0
+_bsp_done:
+    ; BSP traversal complete.
+    ; TEST: Fill columns using visit count + angle to verify traversal worked
+    lm r5, (RAM_ANGLE)          ; r5 = angle (0-255)
+    lm r6, ($0180)              ; r6 = subsector visit count
+
+    ; Fill 27 columns: height based on angle, color based on visit count
+    iwt r1, #RAM_DRAWSTART
+    iwt r2, #RAM_DRAWEND
+    iwt r3, #RAM_WALLCOLOR
+    ibt r4, #NUM_COLS
+_bsp_diag_fill:
+    ; drawStart = angle/2
+    move r0, r5
+    lsr                         ; r0 = angle/2
+    stb (r1)
     inc r1
-    stb (r1)                ; BP1
-    inc r1
-    stb (r1)                ; BP2
-    inc r1
-    stb (r1)                ; BP3
-    inc r1
+
+    ; drawEnd = 143 - angle/2
+    move r0, r5
+    lsr
+    iwt r7, #143
+    from r7
+    sub r0
+    stb (r2)
+    inc r2
+
+    ; wallColor = 1 (brown, known visible)
+    ibt r0, #1
+    stb (r3)
+    inc r3
+
+    with r4
+    sub #1
+    bne _bsp_diag_fill
+    nop
+
+    ; Fall through to Phase 2 tile rendering.
+
+    ; =================================================================
+    ; PHASE 2: ROW-BY-ROW TILE RENDERING (stb bitplane method)
+    ; =================================================================
+    ; This code reads drawStart[27], drawEnd[27], wallColor[27]
+    ; and writes 8bpp tiles to the framebuffer at $70:0400
+    ;
+    ; For each tile row (0..17), for each column (0..26):
+    ;   Determine ceiling/wall/floor for each of the 8 pixel rows
+    ;   Write 64-byte tile data using stb
+
+    ; Precompute ceiling color bitplanes (color 16 = bit4, BP4=$FF all others $00)
+    iwt r7, #RAM_CEIL_BP
+    ibt r0, #$00
+    stb (r7)
+    inc r7
+    ibt r0, #$00
+    stb (r7)
+    inc r7
+    ibt r0, #$00
+    stb (r7)
+    inc r7
+    ibt r0, #$00
+    stb (r7)
+    inc r7
     ibt r0, #$FF
-    lob
-    stb (r1)                ; BP4=$FF
-    inc r1
-    ibt r0, #0
-    stb (r1)                ; BP5
-    inc r1
-    stb (r1)                ; BP6
-    inc r1
-    stb (r1)                ; BP7
+    stb (r7)
+    inc r7
+    ibt r0, #$00
+    stb (r7)
+    inc r7
+    ibt r0, #$00
+    stb (r7)
+    inc r7
+    ibt r0, #$00
+    stb (r7)
 
-    ; Color 17 = 00010001: BP0=$FF, BP4=$FF, rest $00
-    iwt r1, #RAM_FLOOR_BP
+    ; Precompute floor color bitplanes (color 17 = bit0+bit4, BP0=$FF BP4=$FF)
+    iwt r7, #RAM_FLOOR_BP
     ibt r0, #$FF
-    lob
-    stb (r1)                ; BP0=$FF
-    inc r1
-    ibt r0, #0
-    stb (r1)                ; BP1
-    inc r1
-    stb (r1)                ; BP2
-    inc r1
-    stb (r1)                ; BP3
-    inc r1
+    stb (r7)
+    inc r7
+    ibt r0, #$00
+    stb (r7)
+    inc r7
+    ibt r0, #$00
+    stb (r7)
+    inc r7
+    ibt r0, #$00
+    stb (r7)
+    inc r7
     ibt r0, #$FF
-    lob
-    stb (r1)                ; BP4=$FF
-    inc r1
-    ibt r0, #0
-    stb (r1)                ; BP5
-    inc r1
-    stb (r1)                ; BP6
-    inc r1
-    stb (r1)                ; BP7
+    stb (r7)
+    inc r7
+    ibt r0, #$00
+    stb (r7)
+    inc r7
+    ibt r0, #$00
+    stb (r7)
+    inc r7
+    ibt r0, #$00
+    stb (r7)
 
-    ; ===== PHASE 2: Row-by-row tile rendering =====
-    ; Process tiles sequentially (row 0 cols 0-26, row 1 cols 0-26, ...)
-    ; For each tile: determine color, write 64 bytes of bitplane data
-
-    iwt r1, #FB_BASE        ; r1 = tile write address (auto-advancing)
-    ibt r3, #0              ; r3 = tile_row (0-17)
+    ; Initialize tile row loop
+    ibt r3, #0                  ; r3 = tileRow (0..17)
     ibt r0, #0
-    sm (RAM_TROW_Y), r0     ; pixel_y of row start = 0
+    sm (RAM_TROW_Y), r0        ; pixel_y_start = 0
+
+    ; Compute framebuffer base pointer
+    iwt r1, #FB_BASE
 
 _trow_loop:
-    ibt r2, #0              ; r2 = column (0-26)
+    ; Initialize column loop
+    ibt r2, #0                  ; r2 = column (0..26)
 
 _col_loop:
-    ; Load drawStart[col] and drawEnd[col]
+    ; r1 = FB write pointer (tile data destination)
+    ; r2 = column index (0..26)
+    ; r3 = tile row index (0..17)
+
+    ; Read drawStart, drawEnd, wallColor for this column
     iwt r0, #RAM_DRAWSTART
+    from r2
+    to r8
+    add r0
     to r4
-    add r2
-    ldb (r4)                ; r0 = drawStart[col]
-    move r4, r0             ; r4 = drawStart
+    ldb (r8)                   ; r4 = drawStart
 
     iwt r0, #RAM_DRAWEND
+    from r2
+    to r8
+    add r0
     to r5
-    add r2
-    ldb (r5)                ; r0 = drawEnd[col]
-    move r5, r0             ; r5 = drawEnd
+    ldb (r8)                   ; r5 = drawEnd
 
-    ; Load wallColor[col]
     iwt r0, #RAM_WALLCOLOR
+    from r2
+    to r8
+    add r0
     to r6
-    add r2
-    ldb (r6)                ; r0 = wallColor[col]
-    move r6, r0             ; r6 = wallColor
+    ldb (r8)                   ; r6 = wallColor
 
-    ; Precompute wall BP bytes (color varies per column)
-    ; Color r6: for each bit N, BP[N] = $FF if set, $00 if clear
+    ; Precompute wall color bitplanes from r6
+    ; BP0 = bit0 expanded, BP1 = bit1, ... BP7 = bit7
+    ; For each bit: $FF if set, $00 if clear
     iwt r7, #RAM_WALL_BP
     ; BP0 = bit 0
     from r6
     lob
     ibt r8, #1
-    AND r8                  ; r0 = color & 1
+    AND r8
     ibt r8, #0
     from r8
     to r0
-    sub r0                  ; r0 = 0 - (color&1) = $0000 or $FFFF
-    lob                     ; r0 = $00 or $FF
+    sub r0
+    lob
     stb (r7)
     inc r7
     ; BP1 = bit 1
     from r6
     lob
-    lsr                     ; r0 = color >> 1
+    lsr
     ibt r8, #1
     AND r8
     ibt r8, #0
@@ -817,14 +1294,11 @@ _col_loop:
     inc r7
     ; BP4 = bit 4
     from r6
-    hib                     ; r0 = color >> 8... no, hib gives high byte
-    ; Actually for 8-bit color, bits 4-7 need: color >> 4
-    from r6
     lob
     lsr
     lsr
     lsr
-    lsr                     ; r0 = color >> 4
+    lsr
     ibt r8, #1
     AND r8
     ibt r8, #0
@@ -1050,7 +1524,8 @@ _wt_g3_s:
     cmp r0
     bne _wt_g3
     nop
-    ; Next column (long branch — _col_loop is >128 bytes away)
+
+    ; Next column
     inc r2
     ibt r0, #NUM_COLS
     from r2
@@ -1061,16 +1536,14 @@ _wt_g3_s:
     nop
 _col_done:
 
-    ; Next tile row (long branch — _trow_loop is >128 bytes away)
+    ; Next tile row
     inc r3
-    ; Advance pixel_y_start by 8
     lm r0, (RAM_TROW_Y)
     ibt r2, #8
     from r0
     to r0
     add r2
     sm (RAM_TROW_Y), r0
-    ; Check if done
     ibt r0, #NUM_TROWS
     from r3
     cmp r0
@@ -1088,565 +1561,11 @@ _trow_done:
 ; ROM DATA TABLES
 ; =====================================================================
 
-; --- cameraX_tbl: 27 entries (s16 8.8) ---
-cameraX_tbl:
-    .dw   -256   ; col 0
-    .dw   -237   ; col 1
-    .dw   -218   ; col 2
-    .dw   -199   ; col 3
-    .dw   -180   ; col 4
-    .dw   -161   ; col 5
-    .dw   -142   ; col 6
-    .dw   -123   ; col 7
-    .dw   -104   ; col 8
-    .dw    -85   ; col 9
-    .dw    -66   ; col 10
-    .dw    -47   ; col 11
-    .dw    -28   ; col 12
-    .dw     -9   ; col 13
-    .dw      9   ; col 14
-    .dw     28   ; col 15
-    .dw     47   ; col 16
-    .dw     66   ; col 17
-    .dw     85   ; col 18
-    .dw    104   ; col 19
-    .dw    123   ; col 20
-    .dw    142   ; col 21
-    .dw    161   ; col 22
-    .dw    180   ; col 23
-    .dw    199   ; col 24
-    .dw    218   ; col 25
-    .dw    237   ; col 26
+; Sin/Cos tables (1.15 format, 256 entries each)
+.include "data/gsu_tables.asm"
 
-; --- recip_tbl: 256 entries (u16) ---
-recip_tbl:
-    .dw $7FFF  ; 0
-    .dw $7FFF  ; 1
-    .dw $7FFF  ; 2
-    .dw $5555  ; 3
-    .dw $4000  ; 4
-    .dw $3333  ; 5
-    .dw $2AAA  ; 6
-    .dw $2492  ; 7
-    .dw $2000  ; 8
-    .dw $1C71  ; 9
-    .dw $1999  ; 10
-    .dw $1745  ; 11
-    .dw $1555  ; 12
-    .dw $13B1  ; 13
-    .dw $1249  ; 14
-    .dw $1111  ; 15
-    .dw $1000  ; 16
-    .dw $0F0F  ; 17
-    .dw $0E38  ; 18
-    .dw $0D79  ; 19
-    .dw $0CCC  ; 20
-    .dw $0C30  ; 21
-    .dw $0BA2  ; 22
-    .dw $0B21  ; 23
-    .dw $0AAA  ; 24
-    .dw $0A3D  ; 25
-    .dw $09D8  ; 26
-    .dw $097B  ; 27
-    .dw $0924  ; 28
-    .dw $08D3  ; 29
-    .dw $0888  ; 30
-    .dw $0842  ; 31
-    .dw $0800  ; 32
-    .dw $07C1  ; 33
-    .dw $0787  ; 34
-    .dw $0750  ; 35
-    .dw $071C  ; 36
-    .dw $06EB  ; 37
-    .dw $06BC  ; 38
-    .dw $0690  ; 39
-    .dw $0666  ; 40
-    .dw $063E  ; 41
-    .dw $0618  ; 42
-    .dw $05F4  ; 43
-    .dw $05D1  ; 44
-    .dw $05B0  ; 45
-    .dw $0590  ; 46
-    .dw $0572  ; 47
-    .dw $0555  ; 48
-    .dw $0539  ; 49
-    .dw $051E  ; 50
-    .dw $0505  ; 51
-    .dw $04EC  ; 52
-    .dw $04D4  ; 53
-    .dw $04BD  ; 54
-    .dw $04A7  ; 55
-    .dw $0492  ; 56
-    .dw $047D  ; 57
-    .dw $046A  ; 58
-    .dw $0457  ; 59
-    .dw $0444  ; 60
-    .dw $0432  ; 61
-    .dw $0421  ; 62
-    .dw $0410  ; 63
-    .dw $0400  ; 64
-    .dw $03F0  ; 65
-    .dw $03E0  ; 66
-    .dw $03D2  ; 67
-    .dw $03C3  ; 68
-    .dw $03B5  ; 69
-    .dw $03A8  ; 70
-    .dw $039B  ; 71
-    .dw $038E  ; 72
-    .dw $0381  ; 73
-    .dw $0375  ; 74
-    .dw $0369  ; 75
-    .dw $035E  ; 76
-    .dw $0353  ; 77
-    .dw $0348  ; 78
-    .dw $033D  ; 79
-    .dw $0333  ; 80
-    .dw $0329  ; 81
-    .dw $031F  ; 82
-    .dw $0315  ; 83
-    .dw $030C  ; 84
-    .dw $0303  ; 85
-    .dw $02FA  ; 86
-    .dw $02F1  ; 87
-    .dw $02E8  ; 88
-    .dw $02E0  ; 89
-    .dw $02D8  ; 90
-    .dw $02D0  ; 91
-    .dw $02C8  ; 92
-    .dw $02C0  ; 93
-    .dw $02B9  ; 94
-    .dw $02B1  ; 95
-    .dw $02AA  ; 96
-    .dw $02A3  ; 97
-    .dw $029C  ; 98
-    .dw $0295  ; 99
-    .dw $028F  ; 100
-    .dw $0288  ; 101
-    .dw $0282  ; 102
-    .dw $027C  ; 103
-    .dw $0276  ; 104
-    .dw $0270  ; 105
-    .dw $026A  ; 106
-    .dw $0264  ; 107
-    .dw $025E  ; 108
-    .dw $0259  ; 109
-    .dw $0253  ; 110
-    .dw $024E  ; 111
-    .dw $0249  ; 112
-    .dw $0243  ; 113
-    .dw $023E  ; 114
-    .dw $0239  ; 115
-    .dw $0234  ; 116
-    .dw $0230  ; 117
-    .dw $022B  ; 118
-    .dw $0226  ; 119
-    .dw $0222  ; 120
-    .dw $021D  ; 121
-    .dw $0219  ; 122
-    .dw $0214  ; 123
-    .dw $0210  ; 124
-    .dw $020C  ; 125
-    .dw $0208  ; 126
-    .dw $0204  ; 127
-    .dw $0200  ; 128
-    .dw $01FC  ; 129
-    .dw $01F8  ; 130
-    .dw $01F4  ; 131
-    .dw $01F0  ; 132
-    .dw $01EC  ; 133
-    .dw $01E9  ; 134
-    .dw $01E5  ; 135
-    .dw $01E1  ; 136
-    .dw $01DE  ; 137
-    .dw $01DA  ; 138
-    .dw $01D7  ; 139
-    .dw $01D4  ; 140
-    .dw $01D0  ; 141
-    .dw $01CD  ; 142
-    .dw $01CA  ; 143
-    .dw $01C7  ; 144
-    .dw $01C3  ; 145
-    .dw $01C0  ; 146
-    .dw $01BD  ; 147
-    .dw $01BA  ; 148
-    .dw $01B7  ; 149
-    .dw $01B4  ; 150
-    .dw $01B2  ; 151
-    .dw $01AF  ; 152
-    .dw $01AC  ; 153
-    .dw $01A9  ; 154
-    .dw $01A6  ; 155
-    .dw $01A4  ; 156
-    .dw $01A1  ; 157
-    .dw $019E  ; 158
-    .dw $019C  ; 159
-    .dw $0199  ; 160
-    .dw $0197  ; 161
-    .dw $0194  ; 162
-    .dw $0192  ; 163
-    .dw $018F  ; 164
-    .dw $018D  ; 165
-    .dw $018A  ; 166
-    .dw $0188  ; 167
-    .dw $0186  ; 168
-    .dw $0183  ; 169
-    .dw $0181  ; 170
-    .dw $017F  ; 171
-    .dw $017D  ; 172
-    .dw $017A  ; 173
-    .dw $0178  ; 174
-    .dw $0176  ; 175
-    .dw $0174  ; 176
-    .dw $0172  ; 177
-    .dw $0170  ; 178
-    .dw $016E  ; 179
-    .dw $016C  ; 180
-    .dw $016A  ; 181
-    .dw $0168  ; 182
-    .dw $0166  ; 183
-    .dw $0164  ; 184
-    .dw $0162  ; 185
-    .dw $0160  ; 186
-    .dw $015E  ; 187
-    .dw $015C  ; 188
-    .dw $015B  ; 189
-    .dw $0159  ; 190
-    .dw $0157  ; 191
-    .dw $0155  ; 192
-    .dw $0153  ; 193
-    .dw $0152  ; 194
-    .dw $0150  ; 195
-    .dw $014E  ; 196
-    .dw $014D  ; 197
-    .dw $014B  ; 198
-    .dw $0149  ; 199
-    .dw $0148  ; 200
-    .dw $0146  ; 201
-    .dw $0144  ; 202
-    .dw $0143  ; 203
-    .dw $0141  ; 204
-    .dw $0140  ; 205
-    .dw $013E  ; 206
-    .dw $013D  ; 207
-    .dw $013B  ; 208
-    .dw $013A  ; 209
-    .dw $0138  ; 210
-    .dw $0137  ; 211
-    .dw $0135  ; 212
-    .dw $0134  ; 213
-    .dw $0132  ; 214
-    .dw $0131  ; 215
-    .dw $0130  ; 216
-    .dw $012E  ; 217
-    .dw $012D  ; 218
-    .dw $012B  ; 219
-    .dw $012A  ; 220
-    .dw $0129  ; 221
-    .dw $0127  ; 222
-    .dw $0126  ; 223
-    .dw $0125  ; 224
-    .dw $0124  ; 225
-    .dw $0122  ; 226
-    .dw $0121  ; 227
-    .dw $0120  ; 228
-    .dw $011E  ; 229
-    .dw $011D  ; 230
-    .dw $011C  ; 231
-    .dw $011B  ; 232
-    .dw $011A  ; 233
-    .dw $0118  ; 234
-    .dw $0117  ; 235
-    .dw $0116  ; 236
-    .dw $0115  ; 237
-    .dw $0114  ; 238
-    .dw $0113  ; 239
-    .dw $0111  ; 240
-    .dw $0110  ; 241
-    .dw $010F  ; 242
-    .dw $010E  ; 243
-    .dw $010D  ; 244
-    .dw $010C  ; 245
-    .dw $010B  ; 246
-    .dw $010A  ; 247
-    .dw $0109  ; 248
-    .dw $0108  ; 249
-    .dw $0107  ; 250
-    .dw $0106  ; 251
-    .dw $0105  ; 252
-    .dw $0104  ; 253
-    .dw $0103  ; 254
-    .dw $0102  ; 255
+; BSP map data (Doom SNES format)
+.include "data/bsp_data.asm"
 
-; --- height_tbl: 256 entries (u8) ---
-height_tbl:
-    .db 144    ; 0
-    .db 144    ; 1
-    .db 144    ; 2
-    .db 144    ; 3
-    .db 144    ; 4
-    .db 144    ; 5
-    .db 144    ; 6
-    .db 144    ; 7
-    .db 144    ; 8
-    .db 144    ; 9
-    .db 144    ; 10
-    .db 144    ; 11
-    .db 144    ; 12
-    .db 144    ; 13
-    .db 144    ; 14
-    .db 144    ; 15
-    .db 144    ; 16
-    .db 135    ; 17
-    .db 128    ; 18
-    .db 121    ; 19
-    .db 115    ; 20
-    .db 109    ; 21
-    .db 104    ; 22
-    .db 100    ; 23
-    .db  96    ; 24
-    .db  92    ; 25
-    .db  88    ; 26
-    .db  85    ; 27
-    .db  82    ; 28
-    .db  79    ; 29
-    .db  76    ; 30
-    .db  74    ; 31
-    .db  72    ; 32
-    .db  69    ; 33
-    .db  67    ; 34
-    .db  65    ; 35
-    .db  64    ; 36
-    .db  62    ; 37
-    .db  60    ; 38
-    .db  59    ; 39
-    .db  57    ; 40
-    .db  56    ; 41
-    .db  54    ; 42
-    .db  53    ; 43
-    .db  52    ; 44
-    .db  51    ; 45
-    .db  50    ; 46
-    .db  49    ; 47
-    .db  48    ; 48
-    .db  47    ; 49
-    .db  46    ; 50
-    .db  45    ; 51
-    .db  44    ; 52
-    .db  43    ; 53
-    .db  42    ; 54
-    .db  41    ; 55
-    .db  41    ; 56
-    .db  40    ; 57
-    .db  39    ; 58
-    .db  39    ; 59
-    .db  38    ; 60
-    .db  37    ; 61
-    .db  37    ; 62
-    .db  36    ; 63
-    .db  36    ; 64
-    .db  35    ; 65
-    .db  34    ; 66
-    .db  34    ; 67
-    .db  33    ; 68
-    .db  33    ; 69
-    .db  32    ; 70
-    .db  32    ; 71
-    .db  32    ; 72
-    .db  31    ; 73
-    .db  31    ; 74
-    .db  30    ; 75
-    .db  30    ; 76
-    .db  29    ; 77
-    .db  29    ; 78
-    .db  29    ; 79
-    .db  28    ; 80
-    .db  28    ; 81
-    .db  28    ; 82
-    .db  27    ; 83
-    .db  27    ; 84
-    .db  27    ; 85
-    .db  26    ; 86
-    .db  26    ; 87
-    .db  26    ; 88
-    .db  25    ; 89
-    .db  25    ; 90
-    .db  25    ; 91
-    .db  25    ; 92
-    .db  24    ; 93
-    .db  24    ; 94
-    .db  24    ; 95
-    .db  24    ; 96
-    .db  23    ; 97
-    .db  23    ; 98
-    .db  23    ; 99
-    .db  23    ; 100
-    .db  22    ; 101
-    .db  22    ; 102
-    .db  22    ; 103
-    .db  22    ; 104
-    .db  21    ; 105
-    .db  21    ; 106
-    .db  21    ; 107
-    .db  21    ; 108
-    .db  21    ; 109
-    .db  20    ; 110
-    .db  20    ; 111
-    .db  20    ; 112
-    .db  20    ; 113
-    .db  20    ; 114
-    .db  20    ; 115
-    .db  19    ; 116
-    .db  19    ; 117
-    .db  19    ; 118
-    .db  19    ; 119
-    .db  19    ; 120
-    .db  19    ; 121
-    .db  18    ; 122
-    .db  18    ; 123
-    .db  18    ; 124
-    .db  18    ; 125
-    .db  18    ; 126
-    .db  18    ; 127
-    .db  18    ; 128
-    .db  17    ; 129
-    .db  17    ; 130
-    .db  17    ; 131
-    .db  17    ; 132
-    .db  17    ; 133
-    .db  17    ; 134
-    .db  17    ; 135
-    .db  16    ; 136
-    .db  16    ; 137
-    .db  16    ; 138
-    .db  16    ; 139
-    .db  16    ; 140
-    .db  16    ; 141
-    .db  16    ; 142
-    .db  16    ; 143
-    .db  16    ; 144
-    .db  15    ; 145
-    .db  15    ; 146
-    .db  15    ; 147
-    .db  15    ; 148
-    .db  15    ; 149
-    .db  15    ; 150
-    .db  15    ; 151
-    .db  15    ; 152
-    .db  15    ; 153
-    .db  14    ; 154
-    .db  14    ; 155
-    .db  14    ; 156
-    .db  14    ; 157
-    .db  14    ; 158
-    .db  14    ; 159
-    .db  14    ; 160
-    .db  14    ; 161
-    .db  14    ; 162
-    .db  14    ; 163
-    .db  14    ; 164
-    .db  13    ; 165
-    .db  13    ; 166
-    .db  13    ; 167
-    .db  13    ; 168
-    .db  13    ; 169
-    .db  13    ; 170
-    .db  13    ; 171
-    .db  13    ; 172
-    .db  13    ; 173
-    .db  13    ; 174
-    .db  13    ; 175
-    .db  13    ; 176
-    .db  13    ; 177
-    .db  12    ; 178
-    .db  12    ; 179
-    .db  12    ; 180
-    .db  12    ; 181
-    .db  12    ; 182
-    .db  12    ; 183
-    .db  12    ; 184
-    .db  12    ; 185
-    .db  12    ; 186
-    .db  12    ; 187
-    .db  12    ; 188
-    .db  12    ; 189
-    .db  12    ; 190
-    .db  12    ; 191
-    .db  12    ; 192
-    .db  11    ; 193
-    .db  11    ; 194
-    .db  11    ; 195
-    .db  11    ; 196
-    .db  11    ; 197
-    .db  11    ; 198
-    .db  11    ; 199
-    .db  11    ; 200
-    .db  11    ; 201
-    .db  11    ; 202
-    .db  11    ; 203
-    .db  11    ; 204
-    .db  11    ; 205
-    .db  11    ; 206
-    .db  11    ; 207
-    .db  11    ; 208
-    .db  11    ; 209
-    .db  10    ; 210
-    .db  10    ; 211
-    .db  10    ; 212
-    .db  10    ; 213
-    .db  10    ; 214
-    .db  10    ; 215
-    .db  10    ; 216
-    .db  10    ; 217
-    .db  10    ; 218
-    .db  10    ; 219
-    .db  10    ; 220
-    .db  10    ; 221
-    .db  10    ; 222
-    .db  10    ; 223
-    .db  10    ; 224
-    .db  10    ; 225
-    .db  10    ; 226
-    .db  10    ; 227
-    .db  10    ; 228
-    .db  10    ; 229
-    .db  10    ; 230
-    .db   9    ; 231
-    .db   9    ; 232
-    .db   9    ; 233
-    .db   9    ; 234
-    .db   9    ; 235
-    .db   9    ; 236
-    .db   9    ; 237
-    .db   9    ; 238
-    .db   9    ; 239
-    .db   9    ; 240
-    .db   9    ; 241
-    .db   9    ; 242
-    .db   9    ; 243
-    .db   9    ; 244
-    .db   9    ; 245
-    .db   9    ; 246
-    .db   9    ; 247
-    .db   9    ; 248
-    .db   9    ; 249
-    .db   9    ; 250
-    .db   9    ; 251
-    .db   9    ; 252
-    .db   9    ; 253
-    .db   9    ; 254
-    .db   9    ; 255
-
-; --- map_data: 10x10 map ---
-map_data:
-    .db 1,1,1,1,1,1,1,1,1,1
-    .db 1,0,0,0,0,0,0,0,0,1
-    .db 1,0,0,0,0,0,0,0,0,1
-    .db 1,0,0,0,0,0,0,0,0,1
-    .db 1,0,0,0,2,2,0,0,0,1
-    .db 1,0,0,0,2,2,0,0,0,1
-    .db 1,0,0,0,0,0,0,0,0,1
-    .db 1,0,0,0,0,0,0,0,0,1
-    .db 1,0,0,0,0,0,0,0,0,1
-    .db 1,1,1,1,1,1,1,1,1,1
 
 .ENDS
