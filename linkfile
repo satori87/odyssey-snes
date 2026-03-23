@@ -4,4 +4,3 @@ tcclib.obj
 src/raycaster.obj
 hdr.obj
 data.obj
-gsu_raycaster.obj
