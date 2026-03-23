@@ -25,10 +25,10 @@ typedef signed long long s32;
 #include "../data/tables.h"
 #include "../data/map.h"
 
-#define SCREEN_W  160
-#define SCREEN_H  80
-#define HALF_H    40
-#define NUM_COLS  20
+#define SCREEN_W  128
+#define SCREEN_H  96
+#define HALF_H    48
+#define NUM_COLS  16
 #define COL_W     8
 
 /* Movement speed in 8.8 fixed point */
@@ -216,8 +216,6 @@ int main(void) {
         handleInput();
         writePlayerState();
         startGSU();
-        /* Manual DMA (bypass IRQ for now to verify GSU output) */
-        waitVBlankSimple();
         dmaFramebuffer();
     }
 

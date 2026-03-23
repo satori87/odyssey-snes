@@ -28,9 +28,9 @@
 ;; -------------------------------------------------------
 ;; Constants
 ;; -------------------------------------------------------
-.define VIEWPORT_TOP     48    ; first visible scanline of viewport
-.define VIEWPORT_BOTTOM  176   ; last visible scanline of viewport
-.define IRQ_BOTTOM       176   ; bottom IRQ fires here -> forced blank
+.define VIEWPORT_TOP     0     ; viewport starts at top of screen (2x zoom fills all)
+.define VIEWPORT_BOTTOM  224   ; last visible scanline
+.define IRQ_BOTTOM       224   ; bottom IRQ fires here -> forced blank (after full display)
 
 ;; WRAM addresses for IRQ stub and sync flag
 .define JML_STUB         $7E1F00   ; 4 bytes: JML opcode + 24-bit target
@@ -102,9 +102,9 @@ _IRQBottom:
     lda #$70
     sta.l $4304          ; A1B0: source bank
 
-    ; Transfer size: 12800 bytes (200 tiles * 64 bytes)
+    ; Transfer size: 14336 bytes (224 tiles * 64 bytes)
     rep #$20
-    lda #12800
+    lda #14336
     sta.l $4305          ; DAS0L/DAS0H
     sep #$20
 
@@ -251,20 +251,20 @@ initMode7Display:
     lda #$01
     sta.l $212C
 
-    ; Mode 7 matrix: ~1.6x scale (A=D=$00A0)
-    lda #$A0
+    ; Mode 7 matrix: 2x zoom (A=D=$0080, B=C=$0000)
+    lda #$80
     sta.l $211B
     lda #$00
-    sta.l $211B
+    sta.l $211B          ; M7A = $0080 (0.5 = 2x zoom)
     lda #$00
     sta.l $211C
-    sta.l $211C
+    sta.l $211C          ; M7B = $0000
     sta.l $211D
-    sta.l $211D
-    lda #$A0
+    sta.l $211D          ; M7C = $0000
+    lda #$80
     sta.l $211E
     lda #$00
-    sta.l $211E
+    sta.l $211E          ; M7D = $0080 (0.5 = 2x zoom)
 
     ; Scroll: VOFS/HOFS = 0 and Mode 7 center = 0
     lda #$00
@@ -297,42 +297,53 @@ initMode7Display:
     cpx #$0004
     bne @ExPalLoop
 
-    ; Tilemap: 20x10, tile = row*20+col+1
+    ; Tilemap: 16x14 (16x12 viewport + 16x2 HUD), tile = row*16+col+1
+    ; HUD uses tile 193 (solid yellow). Everything else = tile 0 (black).
     lda #$00
-    sta.l $2115
+    sta.l $2115          ; VMAIN: increment on low-byte write (tilemap)
     rep #$20
     lda #$0000
     sta.l $2116
     sep #$20
-    ldy #$0000
+    ldy #$0000           ; Y = row
 @TM_RowLoop:
-    cpy #$000A
-    bcs @TM_BlankRow
+    cpy #$000C           ; row < 12 = viewport
+    bcc @TM_ViewRow
+    cpy #$000E           ; row < 14 = HUD
+    bcc @TM_HUDRow
+    bra @TM_BlankRow     ; row >= 14 = black
+@TM_ViewRow:
     ldx #$0000
-@TM_ColLoop:
-    cpx #$0014
+@TM_VCol:
+    cpx #$0010           ; col < 16 = viewport tile
     bcs @TM_PadCol
+    ; tile = row*16 + col + 1
     tya
     asl a
     asl a
-    sta $50
-    tya
     asl a
-    asl a
-    asl a
-    asl a
-    clc
-    adc $50
+    asl a                ; row*16
     sta $50
     txa
     clc
     adc $50
-    inc a
+    inc a                ; +1 (1-based tile index)
     sta.l $2118
     lda #$00
     sta.l $2119
     inx
-    bra @TM_ColLoop
+    bra @TM_VCol
+@TM_HUDRow:
+    ldx #$0000
+@TM_HCol:
+    cpx #$0010
+    bcs @TM_PadCol
+    lda #193             ; HUD tile (solid yellow)
+    sta.l $2118
+    lda #$00
+    sta.l $2119
+    inx
+    bra @TM_HCol
 @TM_PadCol:
     lda #$00
     sta.l $2118
@@ -355,9 +366,9 @@ initMode7Display:
     cpy #$0080
     bne @TM_RowLoop
 
-    ; Clear tile pixel data
+    ; Clear tile pixel data (tiles 0-192 = 193 tiles * 64 bytes = 12352 high bytes)
     lda #$80
-    sta.l $2115
+    sta.l $2115          ; VMAIN: increment after high byte write
     rep #$20
     lda #$0000
     sta.l $2116
@@ -368,8 +379,28 @@ initMode7Display:
     lda #$00
     sta.l $2119
     iny
-    cpy #12864
+    cpy #12352           ; 193 tiles * 64 bytes (tiles 0-192)
     bne @ClearTiles
+
+    ; Write HUD tile 193 (color 18 = yellow) — 64 bytes of color index 18
+    ldy #$0000
+@HUDTile:
+    lda #18
+    sta.l $2119
+    iny
+    cpy #64
+    bne @HUDTile
+
+    ; Add yellow to palette at color 18
+    sep #$10
+    lda #18
+    sta.l $2121          ; CGADD = 18
+    ; Yellow in BGR555: R=31, G=31, B=0 = $03FF
+    lda #$FF
+    sta.l $2122
+    lda #$03
+    sta.l $2122
+    rep #$10
 
     ; Screen on (will be controlled by IRQ after setupIRQ)
     lda #INIDISP_ON
@@ -525,53 +556,94 @@ readJoypad:
     rtl
 
 ;; -------------------------------------------------------
-;; Legacy stubs (kept for linkage, should not be called)
+;; dmaFramebuffer -- 3-batch VBlank DMA (flicker-free)
+;; Transfers 192 viewport tiles (12288 bytes) in 3 VBlanks.
+;; Each batch = 4096 bytes (~24 scanlines, well within 38-line VBlank).
+;; HUD tiles (193+) are NOT transferred — they stay as init.
 ;; -------------------------------------------------------
 dmaFramebuffer:
     php
     sep #$20
     rep #$10
-    ; Force blank
-    lda #$80
-    sta.l $2100
+
     ; Give SNES RAM access
     lda #$17
     sta.l $303A
-    ; VMAIN
-    lda #$80
-    sta.l $2115
-    ; VRAM addr
-    rep #$20
-    lda #$0040
-    sta.l $2116
-    sep #$20
-    ; DMA setup
+
+    ; DMA channel 0 setup (constant across batches)
     lda #$00
-    sta.l $4300
+    sta.l $4300          ; DMAP: A->B, 1 register write
     lda #$19
-    sta.l $4301
-    rep #$20
-    lda #$0400
-    sta.l $4302
-    sep #$20
+    sta.l $4301          ; BBAD: $2119 (VRAM high byte)
     lda #$70
-    sta.l $4304
+    sta.l $4304          ; source bank $70
+    lda #$80
+    sta.l $2115          ; VMAIN: increment after high byte write
+
+    ; === Batch 1: 4096 bytes (tiles 1-64) ===
+@WNV1:
+    lda.l $4212
+    and #$80
+    bne @WNV1
+@WV1:
+    lda.l $4212
+    and #$80
+    beq @WV1
     rep #$20
-    lda #12800
+    lda #$0040           ; VRAM word addr (tile 1 = word 64)
+    sta.l $2116
+    lda #$0400           ; source: $70:0400
+    sta.l $4302
+    lda #4096
     sta.l $4305
     sep #$20
     lda #$01
     sta.l $420B
+
+    ; === Batch 2: 4096 bytes (tiles 65-128) ===
+@WNV2:
+    lda.l $4212
+    and #$80
+    bne @WNV2
+@WV2:
+    lda.l $4212
+    and #$80
+    beq @WV2
+    rep #$20
+    lda #$1040           ; VRAM word addr ($0040 + 4096)
+    sta.l $2116
+    lda #$1400           ; source: $70:0400 + 4096
+    sta.l $4302
+    lda #4096
+    sta.l $4305
+    sep #$20
+    lda #$01
+    sta.l $420B
+
+    ; === Batch 3: 4096 bytes (tiles 129-192) ===
+@WNV3:
+    lda.l $4212
+    and #$80
+    bne @WNV3
+@WV3:
+    lda.l $4212
+    and #$80
+    beq @WV3
+    rep #$20
+    lda #$2040           ; VRAM word addr ($0040 + 8192)
+    sta.l $2116
+    lda #$2400           ; source: $70:0400 + 8192
+    sta.l $4302
+    lda #4096
+    sta.l $4305
+    sep #$20
+    lda #$01
+    sta.l $420B
+
     ; Give GSU back RAM
     lda #$1F
     sta.l $303A
-    ; Screen on
-    lda #$07
-    sta.l $2105
-    lda #$01
-    sta.l $212C
-    lda #$0F
-    sta.l $2100
+
     plp
     rtl
 
