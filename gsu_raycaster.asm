@@ -485,8 +485,9 @@ _dda_my_ok2:
     beq _dda_nohit
     nop
 
-    ; Wall hit
+    ; Wall hit — save wall type (1=outer, 2=inner)
     iwt r9, #1
+    sms ($2E), r1           ; wallType = raw map cell value
     iwt r15, #_dda_done - $8000
     nop
 
@@ -638,9 +639,41 @@ _de_ok:
 _de_ok2:
     sms ($2C), r3
 
-    ; Wall color — use single color to avoid 1-ray dark stripe artifacts
-    ibt r0, #WALL_BRIGHT
-    sms ($2E), r0
+    ; === Compute wallX (texture column) ===
+    lms r0, ($26)           ; side
+    move r1, r0
+    ibt r0, #0
+    from r1
+    cmp r0
+    bne _wx_side1
+    nop
+    lms r0, ($28)
+    lms r6, ($14)           ; rayDirY
+    link #4
+    iwt r15, #fp_mul_sub - $8000
+    nop
+    move r1, r0
+    lms r0, ($02)           ; posY
+    add r1
+    bra _wx_done
+    nop
+_wx_side1:
+    lms r0, ($28)
+    lms r6, ($12)           ; rayDirX
+    link #4
+    iwt r15, #fp_mul_sub - $8000
+    nop
+    move r1, r0
+    lms r0, ($00)           ; posX
+    add r1
+_wx_done:
+    from r0
+    to r0
+    lob
+    lsr
+    lsr
+    lsr                     ; texCol (0-31)
+    sms ($32), r0
 
     ; === Step 7: Store ray result in column arrays ===
 _store_col:
@@ -667,6 +700,24 @@ _store_col:
     with r1
     add r2
     lms r0, ($2E)           ; wallColor
+    stb (r1)
+
+    ; texCol[col] at $01E0
+    lms r0, ($10)
+    move r1, r0
+    iwt r2, #$0240
+    with r1
+    add r2
+    lms r0, ($32)           ; texCol
+    stb (r1)
+
+    ; side[col] at $0220
+    lms r0, ($10)
+    move r1, r0
+    iwt r2, #$0280
+    with r1
+    add r2
+    lms r0, ($26)           ; side
     stb (r1)
 
     ; === Next ray ===
@@ -763,6 +814,91 @@ _preload_wc:
     blt _preload_wc
     nop
 
+    ; Load 4 texCol values to $0228
+    iwt r3, #$0228
+    ibt r2, #0
+_preload_tc:
+    lms r0, ($3E)
+    add r2
+    move r1, r0
+    iwt r0, #$0240
+    with r1
+    add r0
+    ldb (r1)
+    stb (r3)
+    inc r3
+    inc r2
+    ibt r0, #RAYS_PER_TILE
+    from r2
+    cmp r0
+    blt _preload_tc
+    nop
+
+    ; Load 4 side values to $022C
+    iwt r3, #$022C
+    ibt r2, #0
+_preload_sd:
+    lms r0, ($3E)
+    add r2
+    move r1, r0
+    iwt r0, #$0280
+    with r1
+    add r0
+    ldb (r1)
+    stb (r3)
+    inc r3
+    inc r2
+    ibt r0, #RAYS_PER_TILE
+    from r2
+    cmp r0
+    blt _preload_sd
+    nop
+
+    ; Compute texStep[4] at $0230 and init texAccum[4] at $0238
+    iwt r3, #$0230
+    iwt r4, #$0238
+    ibt r2, #0
+_preload_step:
+    ; wallHeight = drawEnd - drawStart + 1
+    move r0, r2
+    iwt r10, #$0210
+    with r10
+    add r0
+    ldb (r10)
+    move r5, r0             ; r5 = drawStart
+    move r0, r2
+    iwt r10, #$0218
+    with r10
+    add r0
+    ldb (r10)               ; r0 = drawEnd
+    sub r5
+    inc r0                  ; r0 = wallHeight
+    ; texStep = texStep_tbl[wallHeight-1] (word)
+    sub #1
+    add r0                  ; *2 word offset
+    iwt r1, #((texStep_tbl - $8000) & $FFFF)
+    add r1
+    move r14, r0
+    getb
+    inc r14
+    to r1
+    getbh                   ; r1 = texStep word
+    from r1
+    stw (r3)
+    inc r3
+    inc r3
+    ; texAccum = 0
+    ibt r0, #0
+    stw (r4)
+    inc r4
+    inc r4
+    inc r2
+    ibt r0, #RAYS_PER_TILE
+    from r2
+    cmp r0
+    blt _preload_step
+    nop
+
     ; Now render 12 tile rows
     iwt r8, #0              ; Y = 0 (global pixel row)
     iwt r2, #0              ; tileY = 0
@@ -848,11 +984,94 @@ _pxw:
     cmp r8                  ; drawEnd >= Y?
     blt _pxf
     nop
+
+    ; === WALL: texture lookup with texAccum ===
+    ; Load and advance texAccum
+    move r0, r9
+    add r0                  ; ray*2 (word offset)
+    iwt r10, #$0238
+    with r10
+    add r0                  ; r10 = &texAccum[ray]
+    to r6
+    ldw (r10)               ; r6 = texAccum
+    ; Load texStep
+    move r0, r9
+    add r0
+    iwt r11, #$0230
+    with r11
+    add r0
+    to r0
+    ldw (r11)               ; r0 = texStep
+    ; Advance: new = old + step
+    with r6
+    add r0                  ; r6 = new texAccum
+    from r6
+    stw (r10)               ; store new texAccum
+    ; texRow = old texAccum >> 8
+    with r6
+    sub r0                  ; r6 = old texAccum
+    from r6
+    to r0
+    hib                     ; r0 = texAccum >> 8
+    ibt r6, #$1F
+    AND r6                  ; r0 = texRow & 31
+
+    ; texCol*32 + texRow
+    move r6, r0             ; r6 = texRow
+    move r0, r9
+    iwt r10, #$0228
+    with r10
+    add r0
+    ldb (r10)               ; r0 = texCol
+    from r0
+    to r0
+    swap                    ; texCol << 8
+    lsr
+    lsr
+    lsr                     ; texCol * 32
+    add r6                  ; + texRow = tex offset
+
+    ; Select texture by wallType
+    move r6, r0             ; r6 = tex offset
     move r0, r9
     iwt r10, #$0220
     with r10
     add r0
-    ldb (r10)               ; wallColor[ray]
+    ldb (r10)               ; wallColor = wallType (1 or 2)
+    move r10, r0
+    ibt r0, #2
+    from r10
+    cmp r0
+    beq _px_inner
+    nop
+    iwt r0, #((outer_wall_tex - $8000) & $FFFF)
+    bra _px_texread
+    nop
+_px_inner:
+    iwt r0, #((inner_wall_tex - $8000) & $FFFF)
+_px_texread:
+    add r6
+    move r14, r0
+    getb                    ; r0 = texture color
+
+    ; Darken Y-face: if side==1, add 32
+    move r6, r0
+    move r0, r9
+    iwt r10, #$022C
+    with r10
+    add r0
+    ldb (r10)               ; side
+    add #0                  ; set flags (ldb doesn't)
+    beq _px_bright
+    nop
+    move r0, r6
+    add #15
+    add #15
+    add #2                  ; +32
+    bra _pxd
+    nop
+_px_bright:
+    move r0, r6
     bra _pxd
     nop
 _pxf:
@@ -867,8 +1086,11 @@ _pxd:
     ibt r0, #RAYS_PER_TILE
     from r9
     cmp r0
-    blt _px_loop
+    bge _px_loop_done
     nop
+    iwt r15, #_px_loop - $8000
+    nop
+_px_loop_done:
 
     ; Next pixel row
     inc r1                  ; py++
@@ -1158,5 +1380,23 @@ map_data:
     .db 1,0,0,0,0,0,0,0,0,1
     .db 1,0,0,0,0,0,0,0,0,1
     .db 1,1,1,1,1,1,1,1,1,1
+
+; texStep[h-1] = 8192/h for h=1..96
+texStep_tbl:
+    .dw 8192, 4096, 2730, 2048, 1638, 1365, 1170, 1024
+    .dw 910, 819, 744, 682, 630, 585, 546, 512
+    .dw 481, 455, 431, 409, 390, 372, 356, 341
+    .dw 327, 315, 303, 292, 282, 273, 264, 256
+    .dw 248, 240, 234, 227, 221, 215, 210, 204
+    .dw 199, 195, 190, 186, 182, 178, 174, 170
+    .dw 167, 163, 160, 157, 154, 151, 148, 146
+    .dw 143, 141, 138, 136, 134, 132, 130, 128
+    .dw 126, 124, 122, 120, 118, 117, 115, 113
+    .dw 112, 110, 109, 107, 106, 105, 103, 102
+    .dw 101, 99, 98, 97, 96, 95, 94, 93
+    .dw 92, 91, 90, 89, 88, 87, 86, 85
+
+; Texture data
+.include "data/gsu_textures.asm"
 
 .ENDS
