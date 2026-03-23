@@ -32,8 +32,8 @@ typedef signed long long s32;
 #define COL_W     8
 
 /* Movement speed in 8.8 fixed point */
-#define MOVE_SPEED 20       /* ~0.078 per frame */
-#define ROT_SPEED  4        /* angle increment per frame */
+#define MOVE_SPEED 60       /* ~0.234 per frame */
+#define ROT_SPEED  8        /* angle increment per frame */
 
 /* Joypad bit masks */
 #define PAD_RIGHT  0x0100
@@ -111,12 +111,17 @@ void updateVectors(void) {
 }
 
 /* Check if map position is a wall */
+/* Simple wall check: is map cell at (x,y) solid? */
 u8 isWall(s16 x, s16 y) {
-    u8 mx, my;
-    mx = (u8)(x >> 8);
-    my = (u8)(y >> 8);
+    u16 mx, my, idx;
+    if (x < 0 || y < 0) return 1;
+    mx = (u16)(x >> 8);
+    my = (u16)(y >> 8);
     if (mx >= MAP_W || my >= MAP_H) return 1;
-    return world_map[my][mx] != 0 ? 1 : 0;
+    /* Flatten 2D access: my*10 + mx using shifts+adds (no multiply) */
+    idx = (my << 3) + (my << 1) + mx;  /* my*8 + my*2 + mx = my*10 + mx */
+    if (((u8*)world_map)[idx] != 0) return 1;
+    return 0;
 }
 
 /* ============================================
@@ -145,10 +150,12 @@ void handleInput(void) {
         moveY = fp_mul(dirY, MOVE_SPEED);
         newX = posX + moveX;
         newY = posY + moveY;
-        if (!isWall(newX, posY)) {
+        if (!isWall(newX, newY)) {
             posX = newX;
-        }
-        if (!isWall(posX, newY)) {
+            posY = newY;
+        } else if (!isWall(newX, posY)) {
+            posX = newX;
+        } else if (!isWall(posX, newY)) {
             posY = newY;
         }
     }
@@ -159,10 +166,12 @@ void handleInput(void) {
         moveY = fp_mul(dirY, MOVE_SPEED);
         newX = posX - moveX;
         newY = posY - moveY;
-        if (!isWall(newX, posY)) {
+        if (!isWall(newX, newY)) {
             posX = newX;
-        }
-        if (!isWall(posX, newY)) {
+            posY = newY;
+        } else if (!isWall(newX, posY)) {
+            posX = newX;
+        } else if (!isWall(posX, newY)) {
             posY = newY;
         }
     }
@@ -173,10 +182,12 @@ void handleInput(void) {
         moveY = fp_mul(planeY, MOVE_SPEED);
         newX = posX - moveX;
         newY = posY - moveY;
-        if (!isWall(newX, posY)) {
+        if (!isWall(newX, newY)) {
             posX = newX;
-        }
-        if (!isWall(posX, newY)) {
+            posY = newY;
+        } else if (!isWall(newX, posY)) {
+            posX = newX;
+        } else if (!isWall(posX, newY)) {
             posY = newY;
         }
     }
@@ -187,10 +198,12 @@ void handleInput(void) {
         moveY = fp_mul(planeY, MOVE_SPEED);
         newX = posX + moveX;
         newY = posY + moveY;
-        if (!isWall(newX, posY)) {
+        if (!isWall(newX, newY)) {
             posX = newX;
-        }
-        if (!isWall(posX, newY)) {
+            posY = newY;
+        } else if (!isWall(newX, posY)) {
+            posX = newX;
+        } else if (!isWall(posX, newY)) {
             posY = newY;
         }
     }

@@ -508,6 +508,9 @@ _dda_done:
     nop
     iwt r0, #$0400          ; 4.0 in 8.8
     sms ($28), r0
+    ibt r0, #0
+    sms ($2E), r0           ; wallType = 0 (no hit — prevents ghost columns)
+    sms ($26), r0           ; side = 0
     iwt r15, #_pd_done - $8000
     nop
 
@@ -540,15 +543,15 @@ _pd_side1:
     sms ($28), r0
 
 _pd_done:
-    ; Clamp perpDist >= 1
+    ; Clamp perpDist >= 64 (prevents full-screen column spikes)
     lms r0, ($28)
     move r1, r0
-    ibt r0, #1
+    ibt r0, #64
     from r1
     cmp r0
     bge _pd_ok
     nop
-    ibt r0, #1
+    ibt r0, #64
     sms ($28), r0
 _pd_ok:
 
@@ -560,8 +563,8 @@ _pd_ok:
     cmp r0
     bge _ht_calc
     nop
-    ; perpDist < 256 (< 1.0): full height
-    ibt r0, #SCREEN_H
+    ; perpDist < 256 (< 1.0): cap height to reduce spike visibility
+    ibt r0, #(SCREEN_H - 8)
     sms ($2A), r0
     iwt r15, #_ht_got - $8000
     nop
@@ -591,6 +594,16 @@ _ht_ok:
     add r1
     move r14, r0
     getb                    ; r0 = height (byte from ROM)
+    ; Cap height to reduce spike column visibility
+    move r1, r0
+    ibt r0, #(SCREEN_H - 8)
+    from r1
+    cmp r0
+    blt _ht_cap_ok
+    nop
+    move r1, r0             ; use capped value
+_ht_cap_ok:
+    move r0, r1
     sms ($2A), r0
 
 _ht_got:
@@ -737,11 +750,83 @@ _store_col:
 _all_rays_done:
 
     ; =================================================================
-    ; PHASE 2: TILE RENDERING (7 rays per tile, per-pixel)
+    ; SPIKE FILTER: hide isolated outlier columns (don't render wall)
     ; =================================================================
-    ; 16 tile columns × 7 rays each = 112 rays.
-    ; Pixel mapping within tile: [0,0,1,2,3,4,5,6] (pixels 0-1 share ray 0)
-    ; Preload 7 ray results per tile column into scratch $0150-$0165.
+    ; If a ray's drawStart differs from BOTH neighbors by 8+, hide it
+    ; by setting drawEnd < drawStart (= no wall, just ceiling+floor)
+    ibt r2, #1
+_spike_loop:
+    move r0, r2
+    sub #1
+    iwt r1, #$00C0
+    add r1
+    move r3, r0
+    ldb (r3)
+    move r4, r0             ; ds[ray-1]
+    inc r3
+    ldb (r3)
+    move r5, r0             ; ds[ray]
+    inc r3
+    ldb (r3)
+    move r6, r0             ; ds[ray+1]
+    ; |ds[ray] - ds[ray-1]|
+    from r5
+    to r0
+    sub r4
+    bpl _sp_a1
+    nop
+    from r0
+    not
+    inc r0
+_sp_a1:
+    move r7, r0             ; r7 = |diff1|
+    ; |ds[ray] - ds[ray+1]|
+    from r5
+    to r0
+    sub r6
+    bpl _sp_a2
+    nop
+    from r0
+    not
+    inc r0
+_sp_a2:
+    ; Both diffs must be >= 8
+    ibt r1, #8
+    from r7
+    cmp r1
+    blt _spike_ok           ; diff1 < 8, not a spike
+    nop
+    from r0
+    cmp r1
+    blt _spike_ok           ; diff2 < 8, not a spike
+    nop
+    ; Spike detected — hide wall by setting drawEnd = 0, drawStart = 1
+    move r1, r2
+    iwt r3, #$00C0
+    with r1
+    add r3
+    ibt r0, #HALF_H
+    stb (r1)                ; drawStart = HALF_H (no wall visible)
+    move r1, r2
+    iwt r3, #$0130
+    with r1
+    add r3
+    ibt r0, #0
+    stb (r1)                ; drawEnd = 0 (< drawStart, so no wall)
+_spike_ok:
+    inc r2
+    ibt r0, #(NUM_COLS - 1)
+    from r2
+    cmp r0
+    bge _spike_done
+    nop
+    iwt r15, #_spike_loop - $8000
+    nop
+_spike_done:
+
+    ; =================================================================
+    ; PHASE 2: TEXTURED TILE RENDERING (64 rays, 4/tile, 2px each)
+    ; =================================================================
 
     ibt r0, #0
     sms ($30), r0           ; tileCol = 0
@@ -839,6 +924,12 @@ _preload_tb:
     move r6, r0             ; r6 = side
 
     ; Select texture base: wallType + side → 4 possible textures
+    ; wallType 0 = no hit, use outer wall as fallback
+    moves r0, r5
+    bne _tb_has_wall
+    nop
+    ibt r5, #1              ; treat as outer wall
+_tb_has_wall:
     ibt r0, #2
     from r5
     cmp r0
