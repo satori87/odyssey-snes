@@ -28,7 +28,7 @@ typedef signed long long s32;
 #define SCREEN_W  128
 #define SCREEN_H  96
 #define HALF_H    48
-#define NUM_COLS  16
+#define NUM_COLS  32
 #define COL_W     8
 
 /* Movement speed in 8.8 fixed point */

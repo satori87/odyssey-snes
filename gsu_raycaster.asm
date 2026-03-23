@@ -41,7 +41,8 @@
 ; -------------------------------------------------------
 .define SCREEN_H      96
 .define HALF_H        48
-.define NUM_COLS      16
+.define NUM_COLS      32          ; 32 rays, rendered as 2 sub-columns per tile column
+.define TILE_COLS     16          ; actual tile columns
 .define MAX_STEPS     24
 .define MAP_W         10
 .define MAP_H         10
@@ -646,26 +647,133 @@ _de_ok2:
     nop
     ibt r0, #WALL_BRIGHT
     sms ($2E), r0
-    iwt r15, #_render_col - $8000
+    iwt r15, #_store_col - $8000
     nop
 _wc_dark:
     ibt r0, #WALL_DARK
     sms ($2E), r0
 
-    ; === Step 7: Render column ===
-_render_col:
-    lms r0, ($10)           ; col
-    sms ($30), r0           ; tileX
+    ; === Step 7: Store ray result in column arrays ===
+_store_col:
+    lms r0, ($10)           ; r0 = col (0-31)
+    ; drawStart[col] at $00C0+col
+    move r1, r0
+    iwt r2, #$00C0
+    with r1
+    add r2
+    lms r0, ($2A)           ; drawStart
+    stb (r1)
 
-    lms r5, ($2A)           ; drawStart
-    lms r6, ($2C)           ; drawEnd
-    lms r7, ($2E)           ; wallColor
+    lms r0, ($10)
+    move r1, r0
+    iwt r2, #$00E0
+    with r1
+    add r2
+    lms r0, ($2C)           ; drawEnd
+    stb (r1)
+
+    lms r0, ($10)
+    move r1, r0
+    iwt r2, #$0100
+    with r1
+    add r2
+    lms r0, ($2E)           ; wallColor
+    stb (r1)
+
+    ; === Next ray ===
+    lms r0, ($10)
+    add #1
+    sms ($10), r0
+    move r11, r0
+
+    ibt r0, #NUM_COLS       ; 32 rays
+    from r11
+    cmp r0
+    bge _all_rays_done
+    nop
+    iwt r15, #_col_loop - $8000
+    nop
+
+_all_rays_done:
+
+    ; =================================================================
+    ; PHASE 2: TILE RENDERING (sub-column pairs)
+    ; =================================================================
+    ; 16 tile columns, each with 2 sub-columns (left 4px + right 4px)
+    ; Reads drawStart/drawEnd/wallColor from arrays at $C0/$E0/$100
+
+    ibt r0, #0
+    sms ($30), r0           ; tileCol = 0
+
+_render_tilecol:
+    ; Load sub-column A (left) and B (right) data
+    ; Sub-col A = ray index tileCol*2, Sub-col B = ray index tileCol*2+1
+    lms r0, ($30)           ; tileCol
+    add r0                  ; tileCol*2 = ray index A
+
+    ; Read sub-col A
+    move r1, r0
+    iwt r2, #$00C0
+    with r1
+    add r2
+    ldb (r1)                ; r0 = drawStartA
+    sms ($32), r0           ; save drawStartA
+    lms r0, ($30)
+    add r0
+    move r1, r0
+    iwt r2, #$00E0
+    with r1
+    add r2
+    ldb (r1)                ; r0 = drawEndA
+    sms ($34), r0
+    lms r0, ($30)
+    add r0
+    move r1, r0
+    iwt r2, #$0100
+    with r1
+    add r2
+    ldb (r1)                ; r0 = wallColorA
+    sms ($36), r0
+
+    ; Read sub-col B (ray index = tileCol*2 + 1)
+    lms r0, ($30)
+    add r0
+    add #1
+    move r1, r0
+    iwt r2, #$00C0
+    with r1
+    add r2
+    ldb (r1)
+    sms ($38), r0           ; drawStartB
+    lms r0, ($30)
+    add r0
+    add #1
+    move r1, r0
+    iwt r2, #$00E0
+    with r1
+    add r2
+    ldb (r1)
+    sms ($3A), r0           ; drawEndB
+    lms r0, ($30)
+    add r0
+    add #1
+    move r1, r0
+    iwt r2, #$0100
+    with r1
+    add r2
+    ldb (r1)
+    sms ($3C), r0           ; wallColorB
+
+    ; Load into registers for render loop
+    lms r5, ($32)           ; drawStartA
+    lms r6, ($34)           ; drawEndA
+    lms r7, ($36)           ; wallColorA
 
     iwt r8, #0              ; Y = 0
     iwt r2, #0              ; tileY = 0
 
 _tilerow_loop:
-    ; tileBase = FRAMEBUF + (tileY*16 + tileX) * 64
+    ; tileBase = FRAMEBUF + (tileY*16 + tileCol) * 64
     from r2
     to r0
     add r2                  ; *2
@@ -673,7 +781,7 @@ _tilerow_loop:
     add r0                  ; *8
     add r0                  ; *16
     move r11, r0
-    lms r0, ($30)           ; tileX
+    lms r0, ($30)           ; tileCol
     add r11                 ; tileIndex
 
     ; *64
@@ -704,28 +812,49 @@ _tilerow_loop:
     iwt r1, #0              ; py = 0
 
 _pixrow_loop:
-    ; Color selection
+    ; === Sub-column A color (left 4 pixels) ===
     from r8
-    cmp r5                  ; Y - drawStart
-    bge _chk_wall
+    cmp r5                  ; Y < drawStartA?
+    bge _chk_wallA
     nop
     iwt r9, #CEIL_COLOR
-    iwt r15, #_do_write - $8000
+    bra _colA_done
     nop
-
-_chk_wall:
+_chk_wallA:
     from r6
-    cmp r8                  ; drawEnd - Y
-    blt _do_floor
+    cmp r8                  ; drawEndA >= Y?
+    blt _floorA
     nop
-    move r9, r7
-    iwt r15, #_do_write - $8000
+    move r9, r7             ; wallColorA
+    bra _colA_done
     nop
-
-_do_floor:
+_floorA:
     iwt r9, #FLOOR_COLOR
+_colA_done:
 
-_do_write:
+    ; === Sub-column B color (right 4 pixels) ===
+    lms r0, ($38)           ; drawStartB (reload from RAM)
+    from r8
+    cmp r0                  ; Y < drawStartB?
+    bge _chk_wallB
+    nop
+    iwt r10, #CEIL_COLOR
+    bra _colB_done
+    nop
+_chk_wallB:
+    lms r0, ($3A)           ; drawEndB
+    from r0
+    cmp r8                  ; drawEndB >= Y?
+    blt _floorB
+    nop
+    lms r10, ($3C)          ; wallColorB
+    bra _colB_done
+    nop
+_floorB:
+    iwt r10, #FLOOR_COLOR
+_colB_done:
+
+    ; === Write 8 pixels: 4 of colorA + 4 of colorB ===
     ; addr = tileBase + py*8
     from r1
     to r0
@@ -736,7 +865,7 @@ _do_write:
     to r3
     add r0                  ; r3 = write address
 
-    ; Write 8 pixels
+    ; Left 4 pixels (sub-col A)
     move r0, r9
     stb (r3)
     inc r3
@@ -746,6 +875,8 @@ _do_write:
     inc r3
     stb (r3)
     inc r3
+    ; Right 4 pixels (sub-col B)
+    move r0, r10
     stb (r3)
     inc r3
     stb (r3)
@@ -766,21 +897,24 @@ _do_write:
     ibt r0, #12
     from r2
     cmp r0
-    blt _tilerow_loop
+    bge _tilerow_done
     nop
+    iwt r15, #_tilerow_loop - $8000
+    nop
+_tilerow_done:
 
-    ; === Next column ===
-    lms r0, ($10)
+    ; === Next tile column ===
+    lms r0, ($30)
     add #1
-    sms ($10), r0
+    sms ($30), r0
     move r11, r0
 
-    ibt r0, #NUM_COLS
+    ibt r0, #TILE_COLS      ; 16 tile columns
     from r11
     cmp r0
     bge _all_done
     nop
-    iwt r15, #_col_loop - $8000
+    iwt r15, #_render_tilecol - $8000
     nop
 
 _all_done:
@@ -963,8 +1097,10 @@ frac_mul_sub:
 ; -------------------------------------------------------
 
 cameraX_tbl:
-    .dw -256, -224, -192, -160, -128, -96, -64, -32
-    .dw 0, 32, 64, 96, 128, 160, 192, 224
+    .dw -256, -240, -224, -208, -192, -176, -160, -144
+    .dw -128, -112, -96, -80, -64, -48, -32, -16
+    .dw 0, 16, 32, 48, 64, 80, 96, 112
+    .dw 128, 144, 160, 176, 192, 208, 224, 240
 
 recip_tbl:
     .dw 32767, 32767, 32767, 21845, 16384, 13107, 10922, 9362
