@@ -277,7 +277,7 @@ initMode7Display:
     sta.l $2120
     sta.l $2120
 
-    ; Load palette
+    ; Load palette: colors 0-15 (texture), 16-17 (legacy solid), 18 (HUD yellow)
     lda #$00
     sta.l $2121
     ldx #$0000
@@ -285,7 +285,7 @@ initMode7Display:
     lda.l shared_palette,x
     sta.l $2122
     inx
-    cpx #$0020
+    cpx #$0020           ; 16 colors × 2 bytes = 32
     bne @PalLoop
     lda #16
     sta.l $2121
@@ -296,6 +296,17 @@ initMode7Display:
     inx
     cpx #$0004
     bne @ExPalLoop
+
+    ; Load darkened palette at colors 32-47 (for ceiling texture)
+    lda #32
+    sta.l $2121
+    ldx #$0000
+@DarkPalLoop:
+    lda.l dark_palette,x
+    sta.l $2122
+    inx
+    cpx #$0020           ; 16 colors × 2 bytes = 32
+    bne @DarkPalLoop
 
     ; Tilemap: 16x14 (16x12 viewport + 16x2 HUD), tile = row*16+col+1
     ; HUD uses tile 193 (solid yellow). Everything else = tile 0 (black).

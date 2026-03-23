@@ -159,6 +159,31 @@ def format_texture_c(name, indices, width=TILE_SIZE, height=TILE_SIZE):
     return "\n".join(lines)
 
 
+def format_texture_asm(label, indices, width=TILE_SIZE, height=TILE_SIZE):
+    """Format column-major texture data as WLA-DX .db assembly."""
+    lines = [f"; {width}x{height}, column-major, 1 byte per pixel (palette index 0-15)"]
+    lines.append(f"{label}:")
+    for i in range(0, len(indices), 16):
+        chunk = indices[i:i + 16]
+        vals = ", ".join(f"{v:d}" for v in chunk)
+        lines.append(f"    .db {vals}")
+    return "\n".join(lines)
+
+
+def darken_indices(indices, palette, darken_offset=32):
+    """Remap palette indices to darkened versions (index + darken_offset).
+    Index 0 (black) stays as 0."""
+    return [0 if v == 0 else v + darken_offset for v in indices]
+
+
+def darken_palette(palette, factor=0.5):
+    """Create darkened version of palette by scaling RGB values."""
+    darkened = []
+    for r, g, b in palette:
+        darkened.append((int(r * factor), int(g * factor), int(b * factor)))
+    return darkened
+
+
 def main():
     # Load images
     walls_img = Image.open(WALLS_PATH)
@@ -167,30 +192,52 @@ def main():
     print(f"Loaded walls.png:  {walls_img.size[0]}x{walls_img.size[1]} ({walls_img.mode})")
     print(f"Loaded floors.png: {floors_img.size[0]}x{floors_img.size[1]} ({floors_img.mode})")
 
-    # Extract specific tiles
-    wall_tile = extract_tile(walls_img, col=0, row=2)   # blue stone
-    floor_tile = extract_tile(floors_img, col=5, row=6)  # stone floor
+    # Extract tiles:
+    # Outer wall: walls.png tile (0,2)
+    # Inner wall: walls.png tile (6,2)
+    # Floor: floors.png tile (0,7)
+    outer_wall_tile = extract_tile(walls_img, col=0, row=2)
+    inner_wall_tile = extract_tile(walls_img, col=6, row=2)
+    floor_tile = extract_tile(floors_img, col=0, row=7)
 
-    print(f"Wall tile:  col=0, row=2 from walls.png  ({wall_tile.size[0]}x{wall_tile.size[1]})")
-    print(f"Floor tile: col=5, row=6 from floors.png ({floor_tile.size[0]}x{floor_tile.size[1]})")
+    print(f"Outer wall: col=0, row=2 from walls.png")
+    print(f"Inner wall: col=6, row=2 from walls.png")
+    print(f"Floor tile: col=0, row=7 from floors.png")
 
     # Get pixel data
-    wall_pixels = get_pixels_rgba(wall_tile)
+    outer_pixels = get_pixels_rgba(outer_wall_tile)
+    inner_pixels = get_pixels_rgba(inner_wall_tile)
     floor_pixels = get_pixels_rgba(floor_tile)
 
-    # Build shared palette
-    palette = build_palette(wall_pixels, floor_pixels, max_colors=16)
+    # Build shared palette from all 3 textures
+    all_pixel_sets = [outer_pixels, inner_pixels, floor_pixels]
+    freq = Counter()
+    for pixels in all_pixel_sets:
+        for r, g, b, a in pixels:
+            if a > 0:
+                freq[(r, g, b)] += 1
+    freq.pop((0, 0, 0), None)
+    remaining_slots = 15  # slot 0 = black
+    unique_colors = list(freq.keys())
+    if len(unique_colors) <= remaining_slots:
+        selected = sorted(unique_colors, key=lambda c: -freq[c])
+    else:
+        selected = [c for c, _ in freq.most_common(remaining_slots)]
+    palette = [(0, 0, 0)] + selected
+    while len(palette) < 16:
+        palette.append((0, 0, 0))
 
-    # Count unique opaque colors for reporting
-    wall_freq = collect_opaque_colors(wall_pixels)
-    floor_freq = collect_opaque_colors(floor_pixels)
-    all_unique = set(wall_freq.keys()) | set(floor_freq.keys())
-    print(f"Unique opaque colors: wall={len(wall_freq)}, floor={len(floor_freq)}, combined={len(all_unique)}")
-    print(f"Palette slots used: {sum(1 for c in palette if c != (0, 0, 0) or palette.index(c) == 0)}")
+    print(f"Unique colors across all textures: {len(unique_colors)}")
+    print(f"Palette slots used: {min(len(unique_colors) + 1, 16)}")
 
     # Index pixels to palette (column-major)
-    wall_indices = index_tile(wall_pixels, TILE_SIZE, TILE_SIZE, palette)
+    outer_indices = index_tile(outer_pixels, TILE_SIZE, TILE_SIZE, palette)
+    inner_indices = index_tile(inner_pixels, TILE_SIZE, TILE_SIZE, palette)
     floor_indices = index_tile(floor_pixels, TILE_SIZE, TILE_SIZE, palette)
+
+    # Ceiling = darkened floor (indices + 32, using darkened palette at slots 32-47)
+    ceil_indices = darken_indices(floor_indices, palette)
+    dark_palette = darken_palette(palette)
 
     # Generate output files
     os.makedirs(DATA_DIR, exist_ok=True)
@@ -205,12 +252,24 @@ def main():
         "#ifndef PALETTES_H\n"
         "#define PALETTES_H\n"
     )
-    palette_text = pal_header + "\n" + format_palette_c(palette) + "\n\n#endif /* PALETTES_H */\n"
+    pal_c = format_palette_c(palette)
+    # Also generate darkened palette for ceiling
+    dark_bgr = [rgb_to_bgr555(r, g, b) for r, g, b in dark_palette]
+    dark_c = f"/* Colors 32-47: darkened texture palette (for ceiling) */\n"
+    dark_c += f"const u16 dark_palette[{len(dark_bgr)}] = {{\n"
+    dark_c += "    " + ", ".join(f"0x{v:04X}" for v in dark_bgr) + "\n};"
+
+    palette_text = (pal_header + "\n/* Colors 0-15: texture palette */\n" + pal_c +
+                    "\n/* Colors 16-17: ceiling and floor solid (legacy) */\n"
+                    "const u16 extra_palette[2] = {\n"
+                    "    0x7C00,  /* 16: blue (ceiling) */\n"
+                    "    0x02A0   /* 17: dark green (floor) */\n"
+                    "};\n\n" + dark_c + "\n\n#endif /* PALETTES_H */\n")
 
     with open(PALETTES_PATH, "w", newline="\n") as f:
         f.write(palette_text)
 
-    # --- textures.h ---
+    # --- textures.h (C format, for reference) ---
     tex_header = (
         "/* ============================================\n"
         " * Texture data (column-major, 1 byte/pixel)\n"
@@ -220,19 +279,38 @@ def main():
         "#ifndef TEXTURES_H\n"
         "#define TEXTURES_H\n"
     )
-    wall_text = format_texture_c("wall_texture", wall_indices)
-    floor_text = format_texture_c("floor_texture", floor_indices)
-    textures_output = tex_header + "\n" + wall_text + "\n\n" + floor_text + "\n\n#endif /* TEXTURES_H */\n"
+    textures_output = tex_header + "\n"
+    textures_output += format_texture_c("outer_wall_texture", outer_indices) + "\n\n"
+    textures_output += format_texture_c("inner_wall_texture", inner_indices) + "\n\n"
+    textures_output += format_texture_c("floor_texture", floor_indices) + "\n\n"
+    textures_output += format_texture_c("ceil_texture", ceil_indices) + "\n\n"
+    textures_output += "#endif /* TEXTURES_H */\n"
 
     with open(TEXTURES_PATH, "w", newline="\n") as f:
         f.write(textures_output)
 
+    # --- GSU assembly texture data ---
+    GSU_TEX_PATH = os.path.join(DATA_DIR, "gsu_textures.asm")
+    asm_output = "; Auto-generated texture data for GSU (column-major, 32x32)\n"
+    asm_output += "; Generated by tools/convert_textures_c.py\n\n"
+    asm_output += format_texture_asm("outer_wall_tex", outer_indices) + "\n\n"
+    asm_output += format_texture_asm("inner_wall_tex", inner_indices) + "\n\n"
+    asm_output += format_texture_asm("floor_tex", floor_indices) + "\n\n"
+    asm_output += format_texture_asm("ceil_tex", ceil_indices) + "\n\n"
+
+    with open(GSU_TEX_PATH, "w", newline="\n") as f:
+        f.write(asm_output)
+
     print()
     print(f"Generated: {os.path.normpath(PALETTES_PATH)}")
-    print(f"  16 BGR555 palette entries")
+    print(f"  16 BGR555 palette entries + 16 darkened entries")
     print(f"Generated: {os.path.normpath(TEXTURES_PATH)}")
-    print(f"  wall_texture:  {len(wall_indices)} bytes (32x32 column-major)")
-    print(f"  floor_texture: {len(floor_indices)} bytes (32x32 column-major)")
+    print(f"  outer_wall_texture: {len(outer_indices)} bytes")
+    print(f"  inner_wall_texture: {len(inner_indices)} bytes")
+    print(f"  floor_texture:      {len(floor_indices)} bytes")
+    print(f"  ceil_texture:       {len(ceil_indices)} bytes")
+    print(f"Generated: {os.path.normpath(GSU_TEX_PATH)}")
+    print(f"  GSU assembly texture data (4 textures, {4*1024} bytes total)")
 
 
 if __name__ == "__main__":
