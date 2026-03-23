@@ -814,44 +814,81 @@ _preload_wc:
     blt _preload_wc
     nop
 
-    ; Load 4 texCol values to $0228
+    ; Compute texBase[4] at $0228 (4 words = 8 bytes)
+    ; texBase = texture_rom_addr + texCol*32 (includes darkening via texture selection)
     iwt r3, #$0228
     ibt r2, #0
-_preload_tc:
+_preload_tb:
+    ; Load wallType
     lms r0, ($3E)
     add r2
-    move r1, r0
-    iwt r0, #$0240
+    move r10, r0
+    move r1, r10
+    iwt r0, #$01A0
     with r1
     add r0
-    ldb (r1)
-    stb (r3)
-    inc r3
-    inc r2
-    ibt r0, #RAYS_PER_TILE
-    from r2
-    cmp r0
-    blt _preload_tc
-    nop
+    ldb (r1)               ; r0 = wallType (1 or 2)
+    move r5, r0             ; r5 = wallType
 
-    ; Load 4 side values to $022C
-    iwt r3, #$022C
-    ibt r2, #0
-_preload_sd:
-    lms r0, ($3E)
-    add r2
-    move r1, r0
+    ; Load side
+    move r1, r10
     iwt r0, #$0280
     with r1
     add r0
-    ldb (r1)
-    stb (r3)
+    ldb (r1)               ; r0 = side (0 or 1)
+    move r6, r0             ; r6 = side
+
+    ; Select texture base: wallType + side → 4 possible textures
+    ibt r0, #2
+    from r5
+    cmp r0
+    beq _tb_inner
+    nop
+    ; Outer wall
+    moves r0, r6
+    bne _tb_outer_dark
+    nop
+    iwt r7, #((outer_wall_tex - $8000) & $FFFF)
+    bra _tb_got
+    nop
+_tb_outer_dark:
+    iwt r7, #((outer_wall_dark_tex - $8000) & $FFFF)
+    bra _tb_got
+    nop
+_tb_inner:
+    ; Inner wall
+    moves r0, r6
+    bne _tb_inner_dark
+    nop
+    iwt r7, #((inner_wall_tex - $8000) & $FFFF)
+    bra _tb_got
+    nop
+_tb_inner_dark:
+    iwt r7, #((inner_wall_dark_tex - $8000) & $FFFF)
+_tb_got:
+    ; Add texCol * 32
+    move r1, r10
+    iwt r0, #$0240
+    with r1
+    add r0
+    ldb (r1)               ; r0 = texCol
+    from r0
+    to r0
+    swap                    ; texCol << 8
+    lsr
+    lsr
+    lsr                     ; texCol * 32
+    add r7                  ; r0 = texBase = tex_addr + texCol*32
+
+    ; Store as word
+    stw (r3)
+    inc r3
     inc r3
     inc r2
     ibt r0, #RAYS_PER_TILE
     from r2
     cmp r0
-    blt _preload_sd
+    blt _preload_tb
     nop
 
     ; Compute texStep[4] at $0230 and init texAccum[4] at $0238
@@ -985,7 +1022,7 @@ _pxw:
     blt _pxf
     nop
 
-    ; === WALL: texture lookup with texAccum ===
+    ; === WALL: texture lookup with texAccum + precomputed texBase ===
     ; Load and advance texAccum
     move r0, r9
     add r0                  ; ray*2 (word offset)
@@ -1016,62 +1053,18 @@ _pxw:
     ibt r6, #$1F
     AND r6                  ; r0 = texRow & 31
 
-    ; texCol*32 + texRow
+    ; texBase[ray] + texRow → ROM lookup
     move r6, r0             ; r6 = texRow
     move r0, r9
+    add r0                  ; ray*2
     iwt r10, #$0228
     with r10
     add r0
-    ldb (r10)               ; r0 = texCol
-    from r0
     to r0
-    swap                    ; texCol << 8
-    lsr
-    lsr
-    lsr                     ; texCol * 32
-    add r6                  ; + texRow = tex offset
-
-    ; Select texture by wallType
-    move r6, r0             ; r6 = tex offset
-    move r0, r9
-    iwt r10, #$0220
-    with r10
-    add r0
-    ldb (r10)               ; wallColor = wallType (1 or 2)
-    move r10, r0
-    ibt r0, #2
-    from r10
-    cmp r0
-    beq _px_inner
-    nop
-    iwt r0, #((outer_wall_tex - $8000) & $FFFF)
-    bra _px_texread
-    nop
-_px_inner:
-    iwt r0, #((inner_wall_tex - $8000) & $FFFF)
-_px_texread:
-    add r6
+    ldw (r10)               ; r0 = texBase (precomputed: tex_addr + texCol*32)
+    add r6                  ; + texRow
     move r14, r0
-    getb                    ; r0 = texture color
-
-    ; Darken Y-face: if side==1, add 32
-    move r6, r0
-    move r0, r9
-    iwt r10, #$022C
-    with r10
-    add r0
-    ldb (r10)               ; side
-    add #0                  ; set flags (ldb doesn't)
-    beq _px_bright
-    nop
-    move r0, r6
-    add #15
-    add #15
-    add #2                  ; +32
-    bra _pxd
-    nop
-_px_bright:
-    move r0, r6
+    getb                    ; r0 = texture color (already darkened via texture selection)
     bra _pxd
     nop
 _pxf:
