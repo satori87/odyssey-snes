@@ -961,7 +961,7 @@ renderAllWalls:
     rep #$30
 .ACCU 16
 .INDEX 16
-    ; SAME as proven fillTestWall — init + fill columns 10-99
+    ; Init arrays (inlined, no jsl)
     sep #$20
     ldx #$0000
 @Init2:
@@ -974,18 +974,150 @@ renderAllWalls:
     inx
     cpx #112
     bne @Init2
+    rep #$20
 
-    ldx #$000A
-@Wall2:
-    lda #20
-    sta.l colDrawStart,x
-    lda #60
-    sta.l colDrawEnd,x
+    ; DEBUG: marker BEFORE projection — skip everything
+    sep #$20
+    ldx #$0020
+@DbgPre:
     lda #5
+    sta.l colDrawStart,x
+    lda #75
+    sta.l colDrawEnd,x
+    lda #17              ; floor green — KNOWN visible color
     sta.l colWallColor,x
     inx
-    cpx #100
-    bne @Wall2
+    cpx #$0060
+    bne @DbgPre
+    rep #$20
+    jmp @SkipPN
+
+    ; === Project east wall (X=2304, Y=256..2304) ===
+    ; perpDist = 2304 - posX
+    lda #2304
+    sec
+    sbc.l posX
+    sta $28              ; perpDist
+    cmp #$0001
+    bcs @NotBehind0
+    jmp @SkipPN          ; behind us
+@NotBehind0:
+
+    ; Project endpoint 1: (2304, 256)
+    lda #2304
+    sta $38
+    lda #256
+    sta $3A
+    jsr projectX_asm
+    sta $4A              ; sx1
+
+    ; Project endpoint 2: (2304, 2304)
+    lda #2304
+    sta $38
+    lda #2304
+    sta $3A
+    jsr projectX_asm
+    sta $4C              ; sx2
+
+    ; Sort & clamp
+    lda $4A
+    cmp $4C
+    bcc @NoSwp
+    beq @NoSwp
+    lda $4C
+    ldx $4A
+    sta $4A
+    stx $4C
+@NoSwp:
+    lda $4C
+    cmp #$0001
+    bpl @NotBhd
+    jmp @SkipPN
+@NotBhd:
+    lda $4A
+    cmp #112
+    bmi @Vis
+    jmp @SkipPN
+@Vis:
+    lda $4A
+    bpl @NcL
+    stz $4A
+@NcL:
+    lda $4C
+    cmp #112
+    bcc @NcR
+    lda #112
+    sta $4C
+@NcR:
+
+    ; Wall height from scaleatz
+    lda $28
+    cmp #MAXZ
+    bcc @NcZ
+    lda #MAXZ-1
+@NcZ:
+    asl a
+    tax
+    lda.l scaleatz,x
+    xba
+    and #$00FF
+    cmp #80
+    bcc @NcH
+    lda #80
+@NcH:
+    lsr a                ; halfH
+    sta $4E
+    lda #40
+    sec
+    sbc $4E
+    sep #$20
+    sta $50              ; drawStart
+    lda #40
+    clc
+    adc $4E
+    cmp #80
+    bcc @NcE
+    lda #80
+@NcE:
+    sta $51              ; drawEnd
+
+    ; Fill columns sx1..sx2
+    rep #$20
+    lda $4A
+    and #$00FF
+    tax
+    lda $4C
+    and #$00FF
+    sta $52
+    sep #$20
+@Fcol:
+    lda.l colDrawn,x
+    bne @Fskp
+    lda #$01
+    sta.l colDrawn,x
+    lda $50
+    sta.l colDrawStart,x
+    lda $51
+    sta.l colDrawEnd,x
+    lda #18              ; wall color = YELLOW (same as HUD, definitely visible)
+    sta.l colWallColor,x
+@Fskp:
+    inx
+    rep #$20
+    txa
+    cmp $52
+    sep #$20
+    bcc @Fcol
+
+    ; DEBUG: yellow stripe at col 56 to prove we reached here
+    sep #$20
+    ldx #$0038
+    lda #5
+    sta.l colDrawStart,x
+    lda #75
+    sta.l colDrawEnd,x
+    lda #18
+    sta.l colWallColor,x
     rep #$20
     jmp @SkipPN
 
