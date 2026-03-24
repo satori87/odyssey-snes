@@ -517,15 +517,15 @@ int main(void) {
     initPlayer();
 
     renderAllWalls();
-
-    /* First frame: prepare screenbuffer before loop */
     clearFramebuffer();
     renderColumns();
 
     while (1) {
-        dmaFramebuffer();   /* BlitPlay FIRST — catches VBlank early */
-        clearFramebuffer(); /* DMA clear during active display (fine for WRAM) */
-        renderColumns();    /* write walls during active display */
+        dmaFramebuffer();   /* BlitPlay FIRST */
+        handleInput();      /* d-pad movement + rotation */
+        renderAllWalls();   /* re-project walls from new position */
+        clearFramebuffer(); /* DMA clear */
+        renderColumns();    /* write walls */
     }
 
     return 0;
