@@ -868,6 +868,8 @@ renderOneWall:
     sta $3A
     jsr projectX_asm
     sta $4A              ; sx1
+    lda $40
+    sta $54              ; vz1 (depth at endpoint 1)
 
     ; Project endpoint 2
     lda $24
@@ -876,17 +878,23 @@ renderOneWall:
     sta $3A
     jsr projectX_asm
     sta $4C              ; sx2
+    lda $40
+    sta $56              ; vz2 (depth at endpoint 2)
 
-    ; Signed sort: ensure sx1 <= sx2
+    ; Signed sort: ensure sx1 <= sx2 (swap vz too)
     lda $4A
     sec
-    sbc $4C              ; sx1 - sx2 (signed)
-    bmi @NoSwap          ; negative → sx1 < sx2 → correct
+    sbc $4C
+    bmi @NoSwap
     beq @NoSwap
     lda $4C
     ldx $4A
     sta $4A
     stx $4C
+    lda $56              ; swap vz too
+    ldx $54
+    sta $54
+    stx $56
 @NoSwap:
 
     ; Clip to screen
@@ -918,65 +926,164 @@ renderOneWall:
     sta $4C
 @NoClampR:
 
-    ; Wall height from scaleatz[perpDist]
-    lda $28              ; perpDist
+    ; === Per-column depth interpolation ===
+    ; Compute scale at endpoints, then interpolate per column
+    ; scale1 = scaleatz[clamp(vz1)]
+    lda $54              ; vz1
+    cmp #16
+    bcs @Vz1Ok
+    lda #16              ; clamp near plane
+@Vz1Ok:
     cmp #MAXZ
-    bcc @NoCZ
+    bcc @Vz1Ok2
     lda #MAXZ-1
-@NoCZ:
-    asl a                ; *2 for word index
+@Vz1Ok2:
+    asl a
     tax
-    lda.l scaleatz,x     ; scale (u16)
-    xba                  ; >>8 = wallHeight
+    lda.l scaleatz,x
+    sta $58              ; scale1
+
+    ; scale2 = scaleatz[clamp(vz2)]
+    lda $56              ; vz2
+    cmp #16
+    bcs @Vz2Ok
+    lda #16
+@Vz2Ok:
+    cmp #MAXZ
+    bcc @Vz2Ok2
+    lda #MAXZ-1
+@Vz2Ok2:
+    asl a
+    tax
+    lda.l scaleatz,x
+    sta $5A              ; scale2
+
+    ; scale_step = (scale2 - scale1) / (sx2 - sx1)
+    ; Use hardware divide: 16-bit dividend, 8-bit divisor
+    lda $5A
+    sec
+    sbc $58              ; scale2 - scale1 (signed)
+    sta $5C              ; scale_diff
+    ; column count
+    lda $4C
+    sec
+    sbc $4A              ; sx2 - sx1
+    and #$00FF
+    sta $5E              ; col_count
+    bne @HasCols         ; 0 columns → skip
+    jmp @DoneFill
+@HasCols:
+    ; Signed divide: |scale_diff| / col_count
+    lda $5C
+    bpl @DiffPos
+    eor #$FFFF
+    inc a                ; negate
+    sep #$20
+.ACCU 8
+    sta.l $4204          ; dividend low
+    xba
+    sta.l $4205          ; dividend high
+    lda $5E              ; divisor = col_count
+    sta.l $4206          ; trigger divide
+    rep #$20
+.ACCU 16
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    lda.l $4214          ; quotient
+    eor #$FFFF
+    inc a                ; negate (restore sign)
+    sta $60              ; scale_step (negative)
+    bra @StepReady
+@DiffPos:
+    sep #$20
+.ACCU 8
+    sta.l $4204
+    xba
+    sta.l $4205
+    lda $5E
+    sta.l $4206
+    rep #$20
+.ACCU 16
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    lda.l $4214
+    sta $60              ; scale_step (positive)
+@StepReady:
+
+    ; Fill loop: per-column varying height
+    lda $4A              ; sx1
+    and #$00FF
+    tax
+    lda $4C              ; sx2
+    and #$00FF
+    sta $52              ; stop column
+    lda $58              ; current_scale = scale1
+    sta $62
+    sep #$20
+.ACCU 8
+@FillCol:
+    ; Compute wallHeight from current_scale
+    rep #$20
+.ACCU 16
+    lda $62              ; current_scale
+    xba                  ; >>8
     and #$00FF
     cmp #80
-    bcc @NoClampH
+    bcc @NcH2
     lda #80
-@NoClampH:
-    ; halfH = wallHeight / 2
-    lsr a
-    sta $4E              ; halfH
-    ; drawStart = 40 - halfH
+@NcH2:
+    lsr a                ; halfH
+    sta $4E
     lda #40
     sec
     sbc $4E
     sep #$20
-    sta $50              ; drawStart (u8)
-    ; drawEnd = 40 + halfH
+.ACCU 8
+    sta.l colDrawStart,x ; drawStart
+
     lda #40
     clc
     adc $4E
     cmp #80
-    bcc @NoClampE
+    bcc @NcE2
     lda #80
-@NoClampE:
-    sta $51              ; drawEnd (u8)
+@NcE2:
+    sta.l colDrawEnd,x   ; drawEnd
 
-    ; Fill column arrays for sx1..sx2
-    rep #$20
-    lda $4A              ; sx1
-    and #$00FF
-    tax                  ; X = column index
-    lda $4C              ; sx2
-    and #$00FF
-    sta $52              ; stop column
-    sep #$20
-@FillCol:
-    ; Skip colDrawn check — allow overdraw (back-to-front rendering)
-    lda $50
-    sta.l colDrawStart,x
-    lda $51
-    sta.l colDrawEnd,x
-    lda $2A              ; wall color
+    lda $2A
     sta.l colWallColor,x
-@SkipCol:
+
+    ; Advance scale: current_scale += scale_step
+    rep #$20
+.ACCU 16
+    lda $62
+    clc
+    adc $60              ; + scale_step
+    sta $62
+    sep #$20
+.ACCU 8
+
     inx
     rep #$20
+.ACCU 16
     txa
     cmp $52
     sep #$20
     bcc @FillCol
 
+@DoneFill:
 @Done:
     plp
     rts                  ; called via JSR from renderAllWalls (same bank)
