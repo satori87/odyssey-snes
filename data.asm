@@ -317,17 +317,26 @@ blitPlay:
     sep #$20
     rep #$10
 
-    ; Noah's Ark approach: enter forced blank at scanline 208
-    ; (bottom border = tile 0 = black, invisible blanking)
-    ; Gives 16 extra scanlines before VBlank for DMA
-@WScan:
+    ; Two-phase wait: guarantee DMA starts at scanline 208 exactly.
+    ; Phase 1: if we're past 208, wait until V counter wraps to < 208
+    ; Phase 2: then wait until scanline reaches 208
+    ; This ensures consistent timing regardless of when game loop finishes.
+@WPre:
     lda.l $2137          ; latch H/V counters
-    lda.l $213D          ; V counter low byte (1st read)
-    sta $10              ; save scanline
-    lda.l $213D          ; V counter high (2nd read, resets flip-flop)
+    lda.l $213D          ; V counter low byte
+    sta $10
+    lda.l $213D          ; high byte (reset flip-flop)
     lda $10
-    cmp #208             ; bottom border starts at scanline ~208
-    bcc @WScan           ; loop until scanline >= 208
+    cmp #208
+    bcs @WPre            ; loop while scan >= 208 (wait for next frame)
+@WScan:
+    lda.l $2137          ; latch
+    lda.l $213D          ; V counter low byte
+    sta $10
+    lda.l $213D          ; high byte (reset flip-flop)
+    lda $10
+    cmp #208             ; bottom border (tile row 13 = black)
+    bcc @WScan           ; wait until scan >= 208
 
     ; Forced blank (bottom border is already black = invisible)
     lda #$80
