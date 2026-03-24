@@ -310,19 +310,21 @@ initMode7Display:
 ;; -------------------------------------------------------
 blitPlay:
     php
+    phb                  ; +1 save DBR
+    phd                  ; +2 save DP
 
     sep #$20
     rep #$10
 
-    ; Wait for VBlank
+    ; Wait for VBlank transition (ensures full VBlank time for DMA)
 @WNV:
     lda.l $4212
     and #$80
-    bne @WNV
+    bne @WNV             ; wait for NOT VBlank (active display)
 @WV:
     lda.l $4212
     and #$80
-    beq @WV
+    beq @WV              ; wait for VBlank start
 
     ; Forced blank
     lda #$80
@@ -345,18 +347,26 @@ blitPlay:
     lda #FB_BASE
     sta.l $4302
 
-    ; Unrolled 112-column DMA — all long addressing, no DP/DBR tricks
-    rep #$20
+    ; Set DBR=0 for absolute addressing, DP=$4300 for fast DMA regs
+    pea $0000
+    plb
+    plb
+    pea $4300
+    pld
+
+    ; Fast unrolled DMA: DP=$4300, DBR=0
+    rep #$30
 .ACCU 16
+.INDEX 16
+    ldx #$0050           ; 80 (DMA length)
+    ldy #$0001           ; DMA enable ch0
 
 .define _COL 0
 .REPT 112
-    lda #80
-    sta.l $4305          ; DMA length
+    stx $05              ; $4305 via DP (fast: 2 bytes, ~4 cycles)
     lda #(_COL * 128 + 8)
-    sta.l $2116          ; VMADD
-    lda #$0001
-    sta.l $420B          ; trigger DMA (also writes $00 to $420C)
+    sta $2116            ; VMADD via absolute (3 bytes, ~4 cycles)
+    sty $420B            ; trigger via absolute (3 bytes, ~4 cycles)
 .REDEFINE _COL _COL + 1
 .ENDR
 .UNDEFINE _COL
@@ -370,7 +380,9 @@ blitPlay:
     lda #$0F
     sta.l $2100
 
-    plp
+    pld                  ; -2 restore DP
+    plb                  ; -1 restore DBR
+    plp                  ; -1 restore P
     rtl
 
 ;; -------------------------------------------------------
@@ -492,61 +504,57 @@ renderColumns:
 
     ldx #$0000           ; column index
 @Col:
-    ; Read column data from C arrays
+    ; Quick check: skip if no wall
+    lda.l colDrawEnd,x
+    sec
+    sbc.l colDrawStart,x
+    beq @Next            ; drawEnd == drawStart → no wall
+
+    ; Save pixel count and column index
+    sta $18              ; count (8-bit)
+    stx $16              ; save col index
+
+    ; Read drawStart and wall color
     lda.l colDrawStart,x
     sta $10
-    lda.l colDrawEnd,x
-    sta $11
     lda.l colWallColor,x
     sta $12
 
-    ; Save column index to DP (NO stack push)
-    stx $16              ; save X to DP $16/$17
-
-    ; Compute table index: col * 2
+    ; Compute WMADD = columnstart[col] + drawStart
     rep #$20
 .ACCU 16
     txa
     and #$00FF
     asl a
     tax
-
-    ; Get column base address
     lda.l columnstart,x
-    sta $14              ; save base address
-
-    ; WMADD low = base_lo + drawStart
+    sta $14
     sep #$20
 .ACCU 8
-    lda $14              ; base low byte
+    lda $14
     clc
-    adc $10              ; + drawStart
+    adc $10
     sta.l $2181          ; WMADDL
-
-    ; WMADD mid = base_hi + carry
-    lda $15              ; base high byte
+    lda $15
     adc #$00
     sta.l $2182          ; WMADDM
 
-    ; Restore column index from DP
+    ; Restore col index
     ldx $16
 
-    ; Write (drawEnd - drawStart) pixels
-    lda $11
-    sec
-    sbc $10
-    beq @Next
+    ; Write pixels: load color ONCE, loop with sta only
+    lda $18              ; count
     rep #$20
 .ACCU 16
-    and #$00FF           ; zero-extend: clear hidden B byte before tay
+    and #$00FF           ; zero-extend (clear B register)
     tay
     sep #$20
 .ACCU 8
+    lda $12              ; wall color (loaded ONCE)
 @Pix:
-    lda $12
-    sta.l $2180
-    dey
-    bne @Pix
+    sta.l $2180          ; 5 cycles
+    dey                  ; 2 cycles
+    bne @Pix             ; 3 cycles = 10 cycles/pixel (was 13)
 
 @Next:
     inx
