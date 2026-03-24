@@ -511,6 +511,8 @@ int main(void) {
     initPlayer();
 
     while (1) {
+        clearFramebuffer();
+        dmaFramebuffer();
     }
 
     return 0;
