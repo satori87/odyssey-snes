@@ -457,7 +457,12 @@ testWMADD:
     sec
     sbc $10
     beq @Next
+    rep #$20
+.ACCU 16
+    and #$00FF           ; zero-extend: clear hidden B byte before tay
     tay
+    sep #$20
+.ACCU 8
 @Pix:
     lda $12
     sta.l $2180
@@ -531,7 +536,12 @@ renderColumns:
     sec
     sbc $10
     beq @Next
+    rep #$20
+.ACCU 16
+    and #$00FF           ; zero-extend: clear hidden B byte before tay
     tay
+    sep #$20
+.ACCU 8
 @Pix:
     lda $12
     sta.l $2180
@@ -990,31 +1000,34 @@ renderAllWalls:
     bne @Init2
     rep #$20
 
-    ; DEBUG: marker BEFORE projection — skip everything
+    ; === Hardcoded east wall: perpDist=384, all columns ===
+    ; scaleatz[384] = 7645, wallHeight = 29, halfH = 14
+    ; drawStart = 26, drawEnd = 54
     sep #$20
-    ldx #$0020
-@DbgPre:
-    lda #5
+.ACCU 8
+    ldx #$0000
+@HardWall:
+    lda #26
     sta.l colDrawStart,x
-    lda #75
+    lda #54
     sta.l colDrawEnd,x
-    lda #5               ; gray wall color (distinct from ceil/floor)
+    lda #5
     sta.l colWallColor,x
     inx
-    cpx #$0060
-    bne @DbgPre
+    cpx #112
+    bne @HardWall
     rep #$20
+.ACCU 16
     jmp @SkipPN
 
-    ; === Project east wall (X=2304, Y=256..2304) ===
-    ; perpDist = 2304 - posX
+    ; === (disabled) Project east wall ===
     lda #2304
     sec
     sbc.l posX
-    sta $28              ; perpDist
+    sta $28
     cmp #$0001
     bcs @NotBehind0
-    jmp @SkipPN          ; behind us
+    jmp @SkipPN
 @NotBehind0:
 
     ; Project endpoint 1: (2304, 256)
@@ -1123,15 +1136,6 @@ renderAllWalls:
     sep #$20
     bcc @Fcol
 
-    ; DEBUG: yellow stripe at col 56 to prove we reached here
-    sep #$20
-    ldx #$0038
-    lda #5
-    sta.l colDrawStart,x
-    lda #75
-    sta.l colDrawEnd,x
-    lda #18
-    sta.l colWallColor,x
     rep #$20
     jmp @SkipPN
 
@@ -1154,7 +1158,7 @@ renderAllWalls:
     lda #2304
     sta $26              ; y2
     sep #$20
-    lda #4               ; wall color
+    lda #5               ; gray wall color (visible)
     sta $2A
     rep #$20
     jsl renderOneWall
