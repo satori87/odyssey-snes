@@ -1040,11 +1040,13 @@ renderAllWalls:
 
     ; Both projections returned — continue to sort/clamp/fill
 
-    ; Sort & clamp
+    ; Signed sort: ensure sx1 <= sx2
     lda $4A
-    cmp $4C
-    bcc @NoSwp
-    beq @NoSwp
+    sec
+    sbc $4C              ; sx1 - sx2 (signed)
+    bmi @NoSwp           ; negative → sx1 < sx2 → correct order
+    beq @NoSwp           ; equal → no swap needed
+    ; sx1 > sx2 → swap
     lda $4C
     ldx $4A
     sta $4A
