@@ -382,9 +382,7 @@ blitPlay:
     rtl
 
 ;; -------------------------------------------------------
-;; clearFramebuffer -- fill screenbuffer with 3-band test pattern
-;; Column-major: 112 columns of 80 rows each
-;; Rows 0-19=ceiling, 20-59=wall, 60-79=floor
+;; clearFramebuffer -- fill screenbuffer with ceiling color
 ;; -------------------------------------------------------
 clearFramebuffer:
     php
@@ -396,33 +394,126 @@ clearFramebuffer:
     lda #FB_BASE
     sta.l $2181
     sep #$20
-    ; 112 columns × 80 rows, sequential via WMADD
-    ldx #$0000           ; column counter
-@Col:
-    ldy #$0000           ; row counter
-@Ceil:
+    ldy #$0000
+@F:
     lda #CEIL_COLOR
     sta.l $2180
     iny
-    cpy #20
-    bne @Ceil
-@Wall:
-    lda #5               ; wall color
-    sta.l $2180
-    iny
-    cpy #60
-    bne @Wall
-@Floor:
+    cpy #FB_SIZE
+    bne @F
+    plp
+    rtl
+
+;; -------------------------------------------------------
+;; renderTestWall -- render a wall at fixed distance
+;; Uses scaleatz to compute wall height from perpDist.
+;; Writes to column-major screenbuffer via WMADD.
+;; Input: perpDist in tcc__r0 (16-bit, 8.8 fixed)
+;; -------------------------------------------------------
+renderTestWall:
+    php
+    sep #$20
+    rep #$10
+
+    ; Look up scale from scaleatz[perpDist]
+    ; scale = scaleatz[perpDist] (16-bit unsigned)
+    ; wallHeight = scale >> 8 (integer part, pixels)
+    rep #$20
+    lda.l tcc__r0        ; perpDist from C argument
+    cmp #MAXZ
+    bcc @Clamp
+    lda #MAXZ-1
+@Clamp:
+    asl a                ; *2 (word index)
+    tax
+    lda.l scaleatz,x     ; scale factor (16-bit)
+    ; wallHeight = scale >> FRACBITS = scale >> 8
+    xba                  ; swap bytes = >>8 (integer part)
+    and #$00FF
+    sta $22              ; wallHeight (0-127 ish)
+
+    ; Clamp to SCREEN_H
+    cmp #SCREEN_H
+    bcc @NoClamp
+    lda #SCREEN_H
+    sta $22
+@NoClamp:
+    ; drawStart = SCREEN_H/2 - wallHeight/2
+    lda #SCREEN_H/2
+    sec
+    sbc $22
+    lsr a                ; wait, need wallHeight/2 not (40-wallHeight)
+    sep #$20
+
+    ; Recompute: drawStart = 40 - wallHeight/2
+    rep #$20
+    lda $22              ; wallHeight
+    lsr a                ; halfHeight
+    sta $24
+    lda #40              ; SCREEN_H / 2
+    sec
+    sbc $24              ; drawStart = 40 - halfHeight
+    bpl @Pos
+    lda #$0000
+@Pos:
+    sta $26              ; drawStart
+    ; drawEnd = 40 + halfHeight
+    lda #40
+    clc
+    adc $24
+    cmp #80
+    bcc @NoClampEnd
+    lda #79
+@NoClampEnd:
+    sta $28              ; drawEnd
+    sep #$20
+
+    ; Set WMADD to screenbuffer start
+    lda #FB_BANK
+    sta.l $2183
+    rep #$20
+    lda #FB_BASE
+    sta.l $2181
+    sep #$20
+
+    ; Write 112 columns, each 80 rows
+    ldx #$0000
+@Col:
+    ldy #$0000           ; row
+@Row:
+    ; Compare row with drawStart/drawEnd (8-bit comparisons)
+    rep #$20
+    tya
+    and #$00FF
+    cmp $26              ; < drawStart?
+    sep #$20
+    bcc @RCeil
+    rep #$20
+    tya
+    and #$00FF
+    cmp $28              ; >= drawEnd?
+    sep #$20
+    bcs @RFloor
+    lda #5               ; wall
+    bra @RWrite
+@RCeil:
+    lda #CEIL_COLOR
+    bra @RWrite
+@RFloor:
     lda #FLOOR_COLOR
+@RWrite:
     sta.l $2180
     iny
     cpy #80
-    bne @Floor
+    bne @Row
     inx
     cpx #112
     bne @Col
+
     plp
     rtl
+
+.define MAXZ 8192
 
 ;; -------------------------------------------------------
 ;; Kept for C compatibility (unused for now)

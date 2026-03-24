@@ -56,6 +56,7 @@ extern u16  readJoypad(void);
 extern void renderColumns(void);
 extern void clearFramebuffer(void);
 extern void dmaFramebuffer(void);
+extern void renderTestWall(u16 perpDist);
 
 /* Player state (8.8 fixed point) */
 s16 posX;           /* position X */
@@ -512,7 +513,7 @@ int main(void) {
     initPlayer();
 
     while (1) {
-        clearFramebuffer();
+        renderTestWall(512);  /* perpDist=512 = 2.0 tiles away */
         dmaFramebuffer();
     }
 
