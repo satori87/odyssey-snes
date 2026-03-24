@@ -770,13 +770,7 @@ projectX_asm:
     lsr a
     sta $44              ; vz8
     beq @Clip
-    ; num = vx * 7
-    lda $42
-    asl a                ; *2
-    adc $42              ; *3 (approximate, carry might be set)
-    asl a                ; *6
-    sec                  ; fix: clear approach
-    ; Redo: vx*7 = vx*8 - vx
+    ; num = vx * 7 = vx * 8 - vx
     lda $42
     asl a
     asl a
@@ -816,13 +810,15 @@ projectX_asm:
     nop
     nop
     lda.l $4214          ; quotient
-    ; num was negative: screenX = 56 + quotient
-    clc
-    adc #56
+    ; num was negative (vx left): screenX = 56 - quotient
+    sta $46
+    lda #56
+    sec
+    sbc $46
     rts
 
 @NumPos:
-    ; num positive: screenX = 56 - quotient
+    ; num positive (vx right): screenX = 56 + quotient
     sep #$20
     lda $46              ; num low
     sta.l $4204
@@ -840,10 +836,8 @@ projectX_asm:
     nop
     nop
     lda.l $4214          ; quotient
-    sta $46
-    lda #56
-    sec
-    sbc $46
+    clc
+    adc #56
     sec
     sbc $46
     rts
@@ -931,9 +925,12 @@ renderOneWall:
     ; Compute scale at endpoints, then interpolate per column
     ; scale1 = scaleatz[clamp(vz1)]
     lda $54              ; vz1
-    cmp #16
-    bcs @Vz1Ok
-    lda #16              ; clamp near plane
+    ; Clamp vz1: if negative or < perpDist, use perpDist
+    bmi @Vz1Clamp        ; negative vz → behind camera → clamp
+    cmp $28              ; compare with perpDist (unsigned OK since both positive)
+    bcs @Vz1Ok           ; vz >= perpDist → OK
+@Vz1Clamp:
+    lda $28              ; use perpDist as minimum
 @Vz1Ok:
     cmp #MAXZ
     bcc @Vz1Ok2
@@ -946,9 +943,12 @@ renderOneWall:
 
     ; scale2 = scaleatz[clamp(vz2)]
     lda $56              ; vz2
-    cmp #16
+    ; Clamp vz2: if negative or < perpDist, use perpDist
+    bmi @Vz2Clamp
+    cmp $28
     bcs @Vz2Ok
-    lda #16
+@Vz2Clamp:
+    lda $28
 @Vz2Ok:
     cmp #MAXZ
     bcc @Vz2Ok2
@@ -1035,6 +1035,11 @@ renderOneWall:
     sep #$20
 .ACCU 8
 @FillCol:
+    ; Front-to-back: skip already-drawn columns
+    lda.l colDrawn,x
+    bne @SkipCol2
+    lda #$01
+    sta.l colDrawn,x
     ; Compute wallHeight from current_scale
     rep #$20
 .ACCU 16
@@ -1066,6 +1071,7 @@ renderOneWall:
     lda $2A
     sta.l colWallColor,x
 
+@SkipCol2:
     ; Advance scale: current_scale += scale_step
     rep #$20
 .ACCU 16
