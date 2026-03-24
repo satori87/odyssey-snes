@@ -434,6 +434,7 @@ testWMADD:
     ; WMADD = columnstart[col] + drawStart
     phx
     rep #$20
+.ACCU 16
     txa
     and #$00FF
     asl a
@@ -481,6 +482,8 @@ renderColumns:
     php
     sep #$20
     rep #$10
+.ACCU 8
+.INDEX 16
 
     ldx #$0000           ; column index
 @Col:
@@ -492,25 +495,36 @@ renderColumns:
     lda.l colWallColor,x
     sta $12
 
-    ; WMADD = columnstart[col] + drawStart
-    phx
+    ; Save column index to DP (NO stack push)
+    stx $16              ; save X to DP $16/$17
+
+    ; Compute table index: col * 2
     rep #$20
+.ACCU 16
     txa
     and #$00FF
     asl a
     tax
+
+    ; Get column base address
     lda.l columnstart,x
+    sta $14              ; save base address
+
+    ; WMADD low = base_lo + drawStart
     sep #$20
+.ACCU 8
+    lda $14              ; base low byte
     clc
-    adc $10              ; low byte + drawStart
+    adc $10              ; + drawStart
     sta.l $2181          ; WMADDL
-    rep #$20
-    lda.l columnstart,x
-    sep #$20
-    xba                  ; high byte of column base
-    adc #$00             ; + carry from low add
+
+    ; WMADD mid = base_hi + carry
+    lda $15              ; base high byte
+    adc #$00
     sta.l $2182          ; WMADDM
-    plx
+
+    ; Restore column index from DP
+    ldx $16
 
     ; Write (drawEnd - drawStart) pixels
     lda $11
@@ -984,7 +998,7 @@ renderAllWalls:
     sta.l colDrawStart,x
     lda #75
     sta.l colDrawEnd,x
-    lda #17              ; floor green — KNOWN visible color
+    lda #5               ; gray wall color (distinct from ceil/floor)
     sta.l colWallColor,x
     inx
     cpx #$0060
