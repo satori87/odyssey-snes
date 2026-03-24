@@ -1205,6 +1205,7 @@ renderOneWall:
     lda $4C
     sec
     sbc $50              ; a2 = angle2 - centershort
+    inc a                ; angle2++ (non-inclusive, matching Noah P_DrawSeg)
     sta $4C
 
     ; Simple clip to [-clipshortangle, +clipshortangle]
@@ -1464,209 +1465,214 @@ renderAllWalls:
     bne @Init2
     rep #$20
 
-    ; === All 8 walls via jsr renderOneWall ===
+    ; === All 8 walls — pillar walls FIRST for correct colDrawn occlusion ===
+    ; Endpoint ordering matches Noah's P_DrawSeg per-direction convention:
+    ;   di_north (fixed X, player east): PTA(segplane,maxtex), PTA(segplane,mintex)
+    ;   di_south (fixed X, player west): PTA(segplane,mintex), PTA(segplane,maxtex)
+    ;   di_east  (fixed Y, player south): PTA(mintex,segplane), PTA(maxtex,segplane)
+    ;   di_west  (fixed Y, player north): PTA(maxtex,segplane), PTA(mintex,segplane)
 .ACCU 16
 .INDEX 16
 
-    ; --- East wall (col=9, X=2304): player east (posX < 2304) ---
-    lda.l posX
-    cmp #2304
-    bcs @SkipE
-    lda #2304
-    sec
-    sbc.l posX
-    sta $28
-    lda #2304
-    sta $20
-    lda #256
-    sta $22
-    lda #2304
-    sta $24
-    lda #2304
-    sta $26
-    sep #$20
-    lda #5
-    sta $2A
-    rep #$20
-    lda #1024
-    sta $2C
-    jsr renderOneWall
-@SkipE:
-
-    ; --- West wall (col=1, X=256): player east (posX > 256) ---
-    lda.l posX
-    cmp #257
-    bcc @SkipW
-    lda.l posX
-    sec
-    sbc #256
-    sta $28
-    lda #256
-    sta $20
-    lda #256
-    sta $22
-    lda #256
-    sta $24
-    lda #2304
-    sta $26
-    sep #$20
-    lda #5               ; gray for west wall
-    sta $2A
-    rep #$20
-    lda #0
-    sta $2C
-    jsr renderOneWall
-@SkipW:
-
-    ; --- South wall (row=1, Y=256): player south (posY > 256) ---
-    lda.l posY
-    cmp #257
-    bcc @SkipS
-    lda.l posY
-    sec
-    sbc #256
-    sta $28
-    lda #256
-    sta $20
-    lda #256
-    sta $22
-    lda #2304
-    sta $24
-    lda #256
-    sta $26
-    sep #$20
-    lda #4               ; DARK color for south wall
-    sta $2A
-    rep #$20
-    lda #1536
-    sta $2C
-    jsr renderOneWall
-@SkipS:
-
-    ; --- North wall (row=9, Y=2304): player north (posY < 2304) ---
-    lda.l posY
-    cmp #2304
-    bcs @SkipN
-    lda #2304
-    sec
-    sbc.l posY
-    sta $28
-    lda #256
-    sta $20
-    lda #2304
-    sta $22
-    lda #2304
-    sta $24
-    lda #2304
-    sta $26
-    sep #$20
-    lda #4               ; DARK color for north wall
-    sta $2A
-    rep #$20
-    lda #512
-    sta $2C
-    jsr renderOneWall
-@SkipN:
-
-    ; --- Pillar east (col=6, X=1536): player east (posX > 1536) ---
+    ; --- Pillar east (X=1536, Y 1024-1536): di_north (player east, posX > 1536) ---
     lda.l posX
     cmp #1537
     bcc @SkipPE
     lda.l posX
     sec
     sbc #1536
-    sta $28
+    sta $28              ; perpDist = posX - 1536
     lda #1536
-    sta $20
+    sta $20              ; x1 = segplane
+    lda #1536
+    sta $22              ; y1 = maxtex (di_north: maxtex first)
+    lda #1536
+    sta $24              ; x2 = segplane
     lda #1024
-    sta $22
-    lda #1536
-    sta $24
-    lda #1536
-    sta $26
+    sta $26              ; y2 = mintex
     sep #$20
     lda #6
     sta $2A
     rep #$20
-    lda #0
-    sta $2C
+    lda #1024
+    sta $2C              ; normalangle_fine = 2*FINEANGLES/4
     jsr renderOneWall
 @SkipPE:
 
-    ; --- Pillar west (col=4, X=1024): player west (posX < 1024) ---
+    ; --- Pillar west (X=1024, Y 1024-1536): di_south (player west, posX < 1024) ---
     lda.l posX
     cmp #1024
     bcs @SkipPW
     lda #1024
     sec
     sbc.l posX
-    sta $28
+    sta $28              ; perpDist = 1024 - posX
     lda #1024
-    sta $20
+    sta $20              ; x1 = segplane
     lda #1024
-    sta $22
+    sta $22              ; y1 = mintex (di_south: mintex first)
     lda #1024
-    sta $24
+    sta $24              ; x2 = segplane
     lda #1536
-    sta $26
+    sta $26              ; y2 = maxtex
     sep #$20
     lda #6
     sta $2A
     rep #$20
-    lda #1024
-    sta $2C
+    lda #0
+    sta $2C              ; normalangle_fine = 0*FINEANGLES/4
     jsr renderOneWall
 @SkipPW:
 
-    ; --- Pillar south (row=6, Y=1536): player south (posY > 1536) ---
+    ; --- Pillar south (Y=1536, X 1024-1536): di_east (player south, posY > 1536) ---
     lda.l posY
     cmp #1537
     bcc @SkipPS
     lda.l posY
     sec
     sbc #1536
-    sta $28
+    sta $28              ; perpDist = posY - 1536
     lda #1024
-    sta $20
+    sta $20              ; x1 = mintex (di_east: mintex first)
     lda #1536
-    sta $22
+    sta $22              ; y1 = segplane
     lda #1536
-    sta $24
+    sta $24              ; x2 = maxtex
     lda #1536
-    sta $26
+    sta $26              ; y2 = segplane
     sep #$20
     lda #7
     sta $2A
     rep #$20
-    lda #1536
-    sta $2C
+    lda #512
+    sta $2C              ; normalangle_fine = 1*FINEANGLES/4
     jsr renderOneWall
 @SkipPS:
 
-    ; --- Pillar north (row=4, Y=1024): player north (posY < 1024) ---
+    ; --- Pillar north (Y=1024, X 1024-1536): di_west (player north, posY < 1024) ---
     lda.l posY
     cmp #1024
     bcs @SkipPN
     lda #1024
     sec
     sbc.l posY
-    sta $28
-    lda #1024
-    sta $20
-    lda #1024
-    sta $22
+    sta $28              ; perpDist = 1024 - posY
     lda #1536
-    sta $24
+    sta $20              ; x1 = maxtex (di_west: maxtex first)
     lda #1024
-    sta $26
+    sta $22              ; y1 = segplane
+    lda #1024
+    sta $24              ; x2 = mintex
+    lda #1024
+    sta $26              ; y2 = segplane
     sep #$20
     lda #7
     sta $2A
     rep #$20
-    lda #512
-    sta $2C
+    lda #1536
+    sta $2C              ; normalangle_fine = 3*FINEANGLES/4
     jsr renderOneWall
 @SkipPN:
+
+    ; --- East wall (X=2304, Y 256-2304): di_south (player west, posX < 2304) ---
+    lda.l posX
+    cmp #2304
+    bcs @SkipE
+    lda #2304
+    sec
+    sbc.l posX
+    sta $28              ; perpDist = 2304 - posX
+    lda #2304
+    sta $20              ; x1 = segplane
+    lda #256
+    sta $22              ; y1 = mintex (di_south: mintex first)
+    lda #2304
+    sta $24              ; x2 = segplane
+    lda #2304
+    sta $26              ; y2 = maxtex
+    sep #$20
+    lda #5
+    sta $2A
+    rep #$20
+    lda #0
+    sta $2C              ; normalangle_fine = 0*FINEANGLES/4
+    jsr renderOneWall
+@SkipE:
+
+    ; --- West wall (X=256, Y 256-2304): di_north (player east, posX > 256) ---
+    lda.l posX
+    cmp #257
+    bcc @SkipW
+    lda.l posX
+    sec
+    sbc #256
+    sta $28              ; perpDist = posX - 256
+    lda #256
+    sta $20              ; x1 = segplane
+    lda #2304
+    sta $22              ; y1 = maxtex (di_north: maxtex first)
+    lda #256
+    sta $24              ; x2 = segplane
+    lda #256
+    sta $26              ; y2 = mintex
+    sep #$20
+    lda #5               ; gray for west wall
+    sta $2A
+    rep #$20
+    lda #1024
+    sta $2C              ; normalangle_fine = 2*FINEANGLES/4
+    jsr renderOneWall
+@SkipW:
+
+    ; --- South wall (Y=256, X 256-2304): di_east (player south, posY > 256) ---
+    lda.l posY
+    cmp #257
+    bcc @SkipS
+    lda.l posY
+    sec
+    sbc #256
+    sta $28              ; perpDist = posY - 256
+    lda #256
+    sta $20              ; x1 = mintex (di_east: mintex first)
+    lda #256
+    sta $22              ; y1 = segplane
+    lda #2304
+    sta $24              ; x2 = maxtex
+    lda #256
+    sta $26              ; y2 = segplane
+    sep #$20
+    lda #4               ; DARK color for south wall
+    sta $2A
+    rep #$20
+    lda #512
+    sta $2C              ; normalangle_fine = 1*FINEANGLES/4
+    jsr renderOneWall
+@SkipS:
+
+    ; --- North wall (Y=2304, X 256-2304): di_west (player north, posY < 2304) ---
+    lda.l posY
+    cmp #2304
+    bcs @SkipN
+    lda #2304
+    sec
+    sbc.l posY
+    sta $28              ; perpDist = 2304 - posY
+    lda #2304
+    sta $20              ; x1 = maxtex (di_west: maxtex first)
+    lda #2304
+    sta $22              ; y1 = segplane
+    lda #256
+    sta $24              ; x2 = mintex
+    lda #2304
+    sta $26              ; y2 = segplane
+    sep #$20
+    lda #4               ; DARK color for north wall
+    sta $2A
+    rep #$20
+    lda #1536
+    sta $2C              ; normalangle_fine = 3*FINEANGLES/4
+    jsr renderOneWall
+@SkipN:
 
     plp
     rtl
