@@ -418,9 +418,136 @@ clearFramebuffer:
     rtl
 
 ;; -------------------------------------------------------
-;; Kept for C compatibility (unused for now)
-renderColumns:
+;; testWMADD -- write a single byte to screenbuffer via WMADD
+;; Tests if ANY WMADD write corrupts the display
+;; -------------------------------------------------------
+testWMADD:
+    php
+    sep #$20
+    rep #$10
+    ; WMBANK already $7F from clearFramebuffer DMA
+    ; Write all 112 columns × wall portion (drawStart=20, drawEnd=60)
+    ; Approach: for each column, set WMADD to base+20, write 40 wall bytes
+
+    ldx #$0000           ; column index
+@Col:
+    ; Read from C arrays (test if this causes corruption)
+    lda.l colDrawStart,x
+    sta $10              ; drawStart from array
+    lda.l colDrawEnd,x
+    sta $11              ; drawEnd from array
+    lda.l colWallColor,x
+    sta $12              ; wallColor from array
+
+    ; WMADD = columnstart[col] + drawStart
+    phx
+    rep #$20
+    txa
+    and #$00FF
+    asl a
+    tax
+    lda.l columnstart,x
+    sep #$20
+    clc
+    adc $10              ; + drawStart (8-bit add to low byte)
+    sta.l $2181          ; WMADDL
+    rep #$20
+    lda.l columnstart,x
+    sep #$20
+    xba                  ; high byte of column base
+    adc #$00             ; + carry
+    sta.l $2182          ; WMADDM
+    plx
+
+    ; Write (drawEnd - drawStart) pixels
+    lda $11
+    sec
+    sbc $10
+    beq @Next
+    tay
+@Pix:
+    lda $12
+    sta.l $2180
+    dey
+    bne @Pix
+
+@Next:
+    inx
+    cpx #112
+    bne @Col
+
+    plp
     rtl
+
+;; -------------------------------------------------------
+;; renderColumns -- write wall portions to screenbuffer
+;; Reads colDrawStart[112], colDrawEnd[112], colWallColor[112]
+;; Only overwrites the wall band (ceiling/floor from DMA clear)
+;; WMBANK ($2183) already set by clearFramebuffer DMA
+;; -------------------------------------------------------
+renderColumns:
+    php
+    sep #$20
+    rep #$10
+
+    ldx #$0000           ; column index
+@Col:
+    ; Read column data from C arrays
+    lda.l colDrawStart,x
+    sta $10
+    lda.l colDrawEnd,x
+    sta $11
+    lda.l colWallColor,x
+    sta $12
+
+    ; WMADD = columnstart[col] + drawStart
+    phx
+    rep #$20
+    txa
+    and #$00FF
+    asl a
+    tax
+    lda.l columnstart,x
+    sep #$20
+    clc
+    adc $10              ; low byte + drawStart
+    sta.l $2181          ; WMADDL
+    rep #$20
+    lda.l columnstart,x
+    sep #$20
+    xba                  ; high byte of column base
+    adc #$00             ; + carry from low add
+    sta.l $2182          ; WMADDM
+    plx
+
+    ; Write (drawEnd - drawStart) pixels
+    lda $11
+    sec
+    sbc $10
+    beq @Next
+    tay
+@Pix:
+    lda $12
+    sta.l $2180
+    dey
+    bne @Pix
+
+@Next:
+    inx
+    cpx #112
+    bne @Col
+
+    plp
+    rtl
+
+;; Column start address table: columnstart[col] = FB_BASE + col*80
+columnstart:
+.define _CS 0
+.REPT 112
+.dw FB_BASE + _CS
+.REDEFINE _CS _CS + 80
+.ENDR
+.UNDEFINE _CS
 
 dmaFramebuffer:
     jmp blitPlay
@@ -458,12 +585,16 @@ zero_byte: .db 0
 ;; -------------------------------------------------------
 playback_bg:
 .REPT 112
-; 40 bytes ceiling color
-.REPT 40
+; 20 bytes ceiling
+.REPT 20
 .db CEIL_COLOR
 .ENDR
-; 40 bytes floor color
+; 40 bytes wall
 .REPT 40
+.db 5
+.ENDR
+; 20 bytes floor
+.REPT 20
 .db FLOOR_COLOR
 .ENDR
 .ENDR
