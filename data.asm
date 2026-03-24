@@ -382,138 +382,40 @@ blitPlay:
     rtl
 
 ;; -------------------------------------------------------
-;; clearFramebuffer -- fill screenbuffer with ceiling color
+;; clearFramebuffer -- DMA playback data to screenbuffer
+;; Noah's Ark style: DMA from ROM → WRAM via WMDATA ($2180)
+;; Much faster than CPU WMADD loop (~3ms vs ~27ms)
 ;; -------------------------------------------------------
 clearFramebuffer:
     php
     sep #$20
     rep #$10
+    ; Set WMADD to screenbuffer start ($7F:2000)
     lda #FB_BANK
     sta.l $2183
     rep #$20
     lda #FB_BASE
     sta.l $2181
     sep #$20
-    ldy #$0000
-@F:
-    lda #CEIL_COLOR
-    sta.l $2180
-    iny
-    cpy #FB_SIZE
-    bne @F
+    ; DMA from ROM playback → WRAM via WMDATA
+    lda #$00
+    sta.l $4300          ; DMA mode: increment, A→B
+    lda #$80             ; B-bus: WMDATA ($2180)
+    sta.l $4301
+    rep #$20
+    lda #playback_bg
+    sta.l $4302          ; source address
+    sep #$20
+    lda #:playback_bg
+    sta.l $4304          ; source bank
+    rep #$20
+    lda #FB_SIZE         ; 8960 bytes
+    sta.l $4305
+    sep #$20
+    lda #$01
+    sta.l $420B          ; trigger DMA
     plp
     rtl
-
-;; -------------------------------------------------------
-;; renderTestWall -- render a wall at fixed distance
-;; Uses scaleatz to compute wall height from perpDist.
-;; Writes to column-major screenbuffer via WMADD.
-;; Input: perpDist in tcc__r0 (16-bit, 8.8 fixed)
-;; -------------------------------------------------------
-renderTestWall:
-    php
-    sep #$20
-    rep #$10
-
-    ; Look up scale from scaleatz[perpDist]
-    ; scale = scaleatz[perpDist] (16-bit unsigned)
-    ; wallHeight = scale >> 8 (integer part, pixels)
-    rep #$20
-    lda.l tcc__r0        ; perpDist from C argument
-    cmp #MAXZ
-    bcc @Clamp
-    lda #MAXZ-1
-@Clamp:
-    asl a                ; *2 (word index)
-    tax
-    lda.l scaleatz,x     ; scale factor (16-bit)
-    ; wallHeight = scale >> FRACBITS = scale >> 8
-    xba                  ; swap bytes = >>8 (integer part)
-    and #$00FF
-    sta $22              ; wallHeight (0-127 ish)
-
-    ; Clamp to SCREEN_H
-    cmp #SCREEN_H
-    bcc @NoClamp
-    lda #SCREEN_H
-    sta $22
-@NoClamp:
-    ; drawStart = SCREEN_H/2 - wallHeight/2
-    lda #SCREEN_H/2
-    sec
-    sbc $22
-    lsr a                ; wait, need wallHeight/2 not (40-wallHeight)
-    sep #$20
-
-    ; Recompute: drawStart = 40 - wallHeight/2
-    rep #$20
-    lda $22              ; wallHeight
-    lsr a                ; halfHeight
-    sta $24
-    lda #40              ; SCREEN_H / 2
-    sec
-    sbc $24              ; drawStart = 40 - halfHeight
-    bpl @Pos
-    lda #$0000
-@Pos:
-    sta $26              ; drawStart
-    ; drawEnd = 40 + halfHeight
-    lda #40
-    clc
-    adc $24
-    cmp #80
-    bcc @NoClampEnd
-    lda #79
-@NoClampEnd:
-    sta $28              ; drawEnd
-    sep #$20
-
-    ; Set WMADD to screenbuffer start
-    lda #FB_BANK
-    sta.l $2183
-    rep #$20
-    lda #FB_BASE
-    sta.l $2181
-    sep #$20
-
-    ; Write 112 columns, each 80 rows
-    ldx #$0000
-@Col:
-    ldy #$0000           ; row
-@Row:
-    ; Compare row with drawStart/drawEnd (8-bit comparisons)
-    rep #$20
-    tya
-    and #$00FF
-    cmp $26              ; < drawStart?
-    sep #$20
-    bcc @RCeil
-    rep #$20
-    tya
-    and #$00FF
-    cmp $28              ; >= drawEnd?
-    sep #$20
-    bcs @RFloor
-    lda #5               ; wall
-    bra @RWrite
-@RCeil:
-    lda #CEIL_COLOR
-    bra @RWrite
-@RFloor:
-    lda #FLOOR_COLOR
-@RWrite:
-    sta.l $2180
-    iny
-    cpy #80
-    bne @Row
-    inx
-    cpx #112
-    bne @Col
-
-    plp
-    rtl
-
-.define MAXZ 8192
 
 ;; -------------------------------------------------------
 ;; Kept for C compatibility (unused for now)
@@ -549,5 +451,21 @@ IRQTrampoline:
     rti
 
 zero_byte: .db 0
+
+;; -------------------------------------------------------
+;; Playback background: 112 columns × 80 rows (ceiling/floor)
+;; Noah's Ark stores this in ROM, DMAs to screenbuffer each frame
+;; -------------------------------------------------------
+playback_bg:
+.REPT 112
+; 40 bytes ceiling color
+.REPT 40
+.db CEIL_COLOR
+.ENDR
+; 40 bytes floor color
+.REPT 40
+.db FLOOR_COLOR
+.ENDR
+.ENDR
 
 .ends
