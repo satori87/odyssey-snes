@@ -24,6 +24,7 @@
 .define CEIL_COLOR      16
 .define FLOOR_COLOR     17
 .define MAXZ            8192
+.define CLIPSHORTANGLE  5888
 
 initMode7Display:
     php
@@ -850,141 +851,175 @@ projectX_asm:
 ;; renderOneWall -- main entry point
 ;; Inputs in DP $20-$2A (set by caller before jsl)
 ;; -------------------------------------------------------
-renderOneWall:
-    php
-    rep #$30             ; 16-bit A, X, Y
+;; -------------------------------------------------------
+;; PointToAngle_asm — (x,y) → 16-bit angle from player
+;; Input: $38/$39 = worldX, $3A/$3B = worldY
+;; Output: A = 16-bit angle (0=east, $4000=north, $8000=west, $C000=south)
+;; Uses posX, posY globals. Clobbers $60-$66.
+;; -------------------------------------------------------
+PointToAngle_asm:
 .ACCU 16
 .INDEX 16
-
-    ; Project endpoint 1
-    lda $20
-    sta $38
-    lda $22
-    sta $3A
-    jsr projectX_asm
-    sta $4A              ; sx1
-    lda $40
-    sta $54              ; vz1 (depth at endpoint 1)
-
-    ; Project endpoint 2
-    lda $24
-    sta $38
-    lda $26
-    sta $3A
-    jsr projectX_asm
-    sta $4C              ; sx2
-    lda $40
-    sta $56              ; vz2 (depth at endpoint 2)
-
-    ; Signed sort: ensure sx1 <= sx2 (swap vz too)
-    lda $4A
+    ; dx = x - posX (positive = east)
+    lda $38
     sec
-    sbc $4C
-    bmi @NoSwap
-    beq @NoSwap
-    lda $4C
-    ldx $4A
-    sta $4A
-    stx $4C
-    lda $56              ; swap vz too
-    ldx $54
-    sta $54
-    stx $56
-@NoSwap:
-
-    ; Clip to screen
-    lda $4C
-    cmp #$0001           ; sx2 <= 0?
-    bpl @NotBehind
-    jmp @Done
-@NotBehind:
-    beq @Done2
-    bra @ChkLeft
-@Done2:
-    jmp @Done
-@ChkLeft:
-    lda $4A
-    cmp #112             ; sx1 >= 112?
-    bmi @Visible
-    jmp @Done
-@Visible:
-
-    ; Clamp
-    lda $4A
-    bpl @NoClampL
-    stz $4A              ; sx1 = 0
-@NoClampL:
-    lda $4C
-    cmp #112
-    bcc @NoClampR
-    lda #112
-    sta $4C
-@NoClampR:
-
-    ; === Per-column depth interpolation ===
-    ; Compute scale at endpoints, then interpolate per column
-    ; scale1 = scaleatz[clamp(vz1)]
-    lda $54              ; vz1
-    ; Clamp vz1: if negative or < perpDist, use perpDist
-    bmi @Vz1Clamp        ; negative vz → behind camera → clamp
-    cmp $28              ; compare with perpDist (unsigned OK since both positive)
-    bcs @Vz1Ok           ; vz >= perpDist → OK
-@Vz1Clamp:
-    lda $28              ; use perpDist as minimum
-@Vz1Ok:
-    cmp #MAXZ
-    bcc @Vz1Ok2
-    lda #MAXZ-1
-@Vz1Ok2:
-    asl a
-    tax
-    lda.l scaleatz,x
-    sta $58              ; scale1
-
-    ; scale2 = scaleatz[clamp(vz2)]
-    lda $56              ; vz2
-    ; Clamp vz2: if negative or < perpDist, use perpDist
-    bmi @Vz2Clamp
-    cmp $28
-    bcs @Vz2Ok
-@Vz2Clamp:
-    lda $28
-@Vz2Ok:
-    cmp #MAXZ
-    bcc @Vz2Ok2
-    lda #MAXZ-1
-@Vz2Ok2:
-    asl a
-    tax
-    lda.l scaleatz,x
-    sta $5A              ; scale2
-
-    ; scale_step = (scale2 - scale1) / (sx2 - sx1)
-    ; Use hardware divide: 16-bit dividend, 8-bit divisor
-    lda $5A
+    sbc.l posX
+    sta $60              ; dx
+    ; dy = posY - y (positive = north, since Y increases south in our map)
+    lda.l posY
     sec
-    sbc $58              ; scale2 - scale1 (signed)
-    sta $5C              ; scale_diff
-    ; column count
-    lda $4C
-    sec
-    sbc $4A              ; sx2 - sx1
-    and #$00FF
-    sta $5E              ; col_count
-    bne @HasCols         ; 0 columns → skip
-    jmp @DoneFill
-@HasCols:
-    ; Signed divide: |scale_diff| / col_count
-    lda $5C
-    bpl @DiffPos
+    sbc $3A
+    sta $62              ; dy
+
+    ; Octant-based lookup using tantoangle[512]
+    ; ax = |dx|, ay = |dy|
+    lda $60
+    bpl @DxPos
     eor #$FFFF
-    inc a                ; negate
+    inc a
+@DxPos:
+    sta $64              ; ax = |dx|
+    lda $62
+    bpl @DyPos
+    eor #$FFFF
+    inc a
+@DyPos:
+    sta $66              ; ay = |dy|
+
+    ; AngleFromSlope(y, x) = tantoangle[(y<<9)/x], clamped
+    ; Reduce to avoid overflow: while y >= 128, shift both down
+    ; Then call internal slope lookup
+
+    lda $60              ; dx
+    bpl @Oct_XPos
+    ; dx < 0 (target is WEST)
+    lda $62              ; dy
+    bpl @Oct_XNeg_YPos
+    ; dx < 0, dy < 0 (octant 4-5: southwest)
+    lda $64              ; ax
+    cmp $66              ; compare ax vs ay
+    bcc @Oct5
+    ; ax > ay → octant 4
+    jsr @SlopeCalc       ; A = AngleFromSlope(ay, ax)
+    clc
+    adc #$8000           ; ANG180 + slope
+    rts
+@Oct5:
+    ; ay >= ax → octant 5
+    lda $64
+    sta $66              ; swap: pass (ax, ay) as (y, x)
+    lda.l posY           ; reload ay... actually just swap
+    ; Simpler: call with ay,ax reversed
+    jsr @SlopeCalcRev    ; A = AngleFromSlope(ax, ay)
+    sta $68
+    lda #$C000           ; ANG270
+    sec
+    sbc $68
+    sec
+    sbc #$0001           ; ANG270 - 1 - slope
+    rts
+
+@Oct_XNeg_YPos:
+    ; dx < 0, dy >= 0 (octant 2-3: northwest)
+    lda $64
+    cmp $66
+    bcc @Oct2
+    ; ax > ay → octant 3
+    jsr @SlopeCalc       ; AngleFromSlope(ay, ax)
+    sta $68
+    lda #$8000           ; ANG180
+    sec
+    sbc $68
+    sec
+    sbc #$0001           ; ANG180 - 1 - slope
+    rts
+@Oct2:
+    ; ay >= ax → octant 2
+    jsr @SlopeCalcRev    ; AngleFromSlope(ax, ay)
+    clc
+    adc #$4000           ; ANG90 + slope
+    rts
+
+@Oct_XPos:
+    ; dx >= 0 (target is EAST)
+    lda $62              ; dy
+    bpl @Oct_XPos_YPos
+    ; dx >= 0, dy < 0 (octant 7-8: southeast)
+    lda $64
+    cmp $66
+    bcc @Oct7
+    ; ax > ay → octant 8 (actually octant 0 mirrored)
+    jsr @SlopeCalc       ; AngleFromSlope(ay, ax)
+    sta $68
+    lda #$0000
+    sec
+    sbc $68              ; negate = -slope (wraps to large unsigned)
+    rts
+@Oct7:
+    ; ay >= ax → octant 7
+    jsr @SlopeCalcRev
+    clc
+    adc #$C000           ; ANG270 + slope
+    rts
+
+@Oct_XPos_YPos:
+    ; dx >= 0, dy >= 0 (octant 0-1: northeast)
+    lda $64
+    cmp $66
+    bcc @Oct1
+    ; ax > ay → octant 0
+    jsr @SlopeCalc       ; AngleFromSlope(ay, ax)
+    rts
+@Oct1:
+    ; ay >= ax → octant 1
+    jsr @SlopeCalcRev    ; AngleFromSlope(ax, ay)
+    sta $68
+    lda #$4000           ; ANG90
+    sec
+    sbc $68
+    sec
+    sbc #$0001           ; ANG90 - 1 - slope
+    rts
+
+;; Internal: AngleFromSlope(ay=$66, ax=$64) — ay < ax
+@SlopeCalc:
+    lda $66              ; y = ay
+    ldx $64              ; x = ax
+    bra @DoSlope
+;; Internal: AngleFromSlope(ax=$64, ay=$66) — ax < ay
+@SlopeCalcRev:
+    lda $64              ; y = ax
+    ldx $66              ; x = ay
+@DoSlope:
+    ; idx = (y << 9) / x, clamped to 512
+    ; Reduce both until y < 128 to prevent overflow
+    stx $6A
+@ReduceLoop:
+    cmp #128
+    bcc @ReduceDone
+    lsr a
+    lsr $6A              ; halve x too (unsigned)
+    bra @ReduceLoop
+@ReduceDone:
+    ldx $6A
+    beq @MaxAngle        ; x=0 → 90°
+    ; y << 9
+    asl a
+    asl a
+    asl a
+    asl a
+    asl a
+    asl a
+    asl a
+    asl a
+    asl a                ; y << 9
+    ; Now divide by x using hardware
     sep #$20
 .ACCU 8
     sta.l $4204          ; dividend low
     xba
     sta.l $4205          ; dividend high
-    lda $5E              ; divisor = col_count
+    txa                  ; x low byte (x < 256 after reduction)
     sta.l $4206          ; trigger divide
     rep #$20
 .ACCU 16
@@ -996,18 +1031,301 @@ renderOneWall:
     nop
     nop
     nop
-    lda.l $4214          ; quotient
+    lda.l $4214          ; quotient = (y<<9)/x
+    cmp #512
+    bcc @IdxOk
+    lda #512
+@IdxOk:
+    asl a                ; *2 for word index
+    tax
+    lda.l tantoangle,x
+    rts
+@MaxAngle:
+    lda #$4000           ; 90°
+    rts
+
+;; -------------------------------------------------------
+;; ScaleFromGlobalAngle_asm — Noah's per-column depth formula
+;; Input: A = visangle (16-bit absolute angle)
+;; Uses: $28=perpDist, $70=centerangle_fine, $2C=normalangle_fine
+;; Returns: A = scale value from scaleatz
+;; -------------------------------------------------------
+ScaleFromGlobalAngle_asm:
+.ACCU 16
+.INDEX 16
+    ; visangle_fine = visangle >> 5
+    lsr a
+    lsr a
+    lsr a
+    lsr a
+    lsr a
+    sta $7E              ; visangle_fine
+
+    ; anglea = (512 + (visangle_fine - centerangle_fine)) & 1023
+    sec
+    sbc $70              ; - centerangle_fine
+    clc
+    adc #512
+    and #$03FF           ; & (FINEANGLES/2 - 1)
+    asl a                ; *2 for word index
+    tax
+    lda.l finesine,x
+    and #$00FF           ; sinea (1-255, fits in 8 bits)
+    sta $74              ; temp: sinea
+
+    ; angleb = (512 + (visangle_fine - normalangle_fine)) & 1023
+    lda $7E              ; visangle_fine
+    sec
+    sbc $2C              ; - normalangle_fine
+    clc
+    adc #512
+    and #$03FF
+    asl a
+    tax
+    lda.l finesine,x
+    and #$00FF           ; sineb
+    sta $76              ; temp: sineb
+    beq @MaxScale        ; sineb=0 → infinite depth → max scale
+
+    ; tz = perpDist * sinea / sineb (Noah's exact formula)
+    ; Step 1: ratio = (sinea << 8) / sineb (8.8 fixed-point ratio)
+    lda $74              ; sinea (1-255)
+    and #$00FF
+    xba                  ; sinea << 8
+    sep #$20
+.ACCU 8
+    sta.l $4204          ; dividend low
+    xba
+    sta.l $4205          ; dividend high
+    lda $76              ; sineb
+    sta.l $4206          ; trigger divide
+    rep #$20
+.ACCU 16
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    lda.l $4214          ; ratio = (sinea/sineb) in 8.8 format
+    tay                  ; Y = ratio
+    ; Step 2: tz = fp_mul(perpDist, ratio) = (perpDist * ratio) >> 8
+    lda $28              ; A = perpDist
+    jsr fp_mul_hw        ; result = perpDist * sinea / sineb
+    bpl @NoOvf           ; positive = no overflow
+    lda #MAXZ-1          ; overflow → max distance
+@NoOvf:
+    ; Look up scaleatz[tz]
+    cmp #MAXZ
+    bcc @TzOk
+    lda #MAXZ-1
+@TzOk:
+    asl a
+    tax
+    lda.l scaleatz,x
+    rts
+
+@MaxScale:
+    lda #$7FFF           ; max scale
+    rts
+
+;; -------------------------------------------------------
+;; renderOneWall — Noah's angle-based approach
+;; Input DP: $20/$22 = endpoint1 (x,y), $24/$26 = endpoint2 (x,y)
+;;           $28 = perpDist, $2A = wall color
+;; Uses PointToAngle_asm + viewangletox + scaleatz
+;; -------------------------------------------------------
+renderOneWall:
+    php
+    rep #$30
+.ACCU 16
+.INDEX 16
+
+    ; --- Step 1: PointToAngle for both endpoints ---
+    ; Endpoint 1: angle + depth
+    lda $20
+    sta $38
+    lda $22
+    sta $3A
+    jsr PointToAngle_asm
+    sta $4A              ; angle1
+
+    ; Endpoint 2: angle + depth
+    lda $24
+    sta $38
+    lda $26
+    sta $3A
+    jsr PointToAngle_asm
+    sta $4C              ; angle2
+
+    ; --- Step 2: Ensure angle1 > angle2 and check span ---
+    ; Noah: angle1 is LEFT (larger), angle2 is RIGHT (smaller)
+    ; If angle1 - angle2 >= $8000, swap and retry
+    lda $4A
+    sec
+    sbc $4C
+    sta $4E
+    cmp #$8000
+    bcc @SpanOk
+    ; Swap angles and retry
+    lda $4C
+    ldx $4A
+    sta $4A
+    stx $4C
+    lda $4A
+    sec
+    sbc $4C
+    sta $4E
+    cmp #$8000
+    bcc @SpanOk
+    jmp @Done            ; still invalid → fully behind
+@SpanOk:
+
+    ; --- Step 3: Make view-relative, clip to FOV ---
+    ; centershort = playerAngle << 8
+    lda.l playerAngle
+    and #$00FF
+    xba                  ; << 8 = centershort
+    sta $50
+
+    lda $4A
+    sec
+    sbc $50              ; a1 = angle1 - centershort (view-relative)
+    sta $4A
+    lda $4C
+    sec
+    sbc $50
+    inc a                ; a2 = angle2 - centershort + 1 (non-inclusive)
+    sta $4C
+
+    ; Clip to clipshortangle
+    lda $4A
+    clc
+    adc #CLIPSHORTANGLE
+    cmp #CLIPSHORTANGLE*2
+    bcc @NoClipL
+    ; tspan > 2*clip → check if entirely off left
+    sec
+    sbc #CLIPSHORTANGLE*2
+    cmp $4E
+    bcc @ClipL
+    jmp @Done            ; entirely off left
+@ClipL:
+    lda #CLIPSHORTANGLE
+    sta $4A              ; clamp to left edge
+@NoClipL:
+
+    lda #CLIPSHORTANGLE
+    sec
+    sbc $4C
+    cmp #CLIPSHORTANGLE*2
+    bcc @NoClipR
+    sec
+    sbc #CLIPSHORTANGLE*2
+    cmp $4E
+    bcc @ClipR
+    jmp @Done            ; entirely off right
+@ClipR:
+    lda #$0000
+    sec
+    sbc #CLIPSHORTANGLE
+    sta $4C              ; clamp to right edge (-clipshortangle)
+@NoClipR:
+
+    ; --- Step 4: Convert angles to screen columns via viewangletox ---
+    ; rw_x = viewangletox[(a1 + ANG90) >> ANGLETOFINESHIFT]
+    lda $4A
+    clc
+    adc #$4000           ; + ANG90
+    lsr a
+    lsr a
+    lsr a
+    lsr a
+    lsr a                ; >> 5 (ANGLETOFINESHIFT)
+    and #$03FF           ; mask to 1024 entries
+    asl a                ; *2 for word index
+    tax
+    lda.l viewangletox,x
+    sta $52              ; rw_x
+
+    ; rw_stopx = viewangletox[(a2 + ANG90 - 1) >> ANGLETOFINESHIFT]
+    lda $4C
+    clc
+    adc #$3FFF           ; + ANG90 - 1
+    lsr a
+    lsr a
+    lsr a
+    lsr a
+    lsr a
+    and #$03FF
+    asl a
+    tax
+    lda.l viewangletox,x
+    sta $54              ; rw_stopx
+
+    ; Check valid range
+    lda $54
+    cmp $52
+    bne @HasCols2
+    jmp @Done            ; rw_stopx == rw_x → less than 1 column
+@HasCols2:
+
+    ; --- Step 5: ScaleFromGlobalAngle at both columns (Noah's method) ---
+    ; scale = scaleatz[ perpDist * sin(anglea) / sin(angleb) ]
+    ; anglea = (512 + (vis_fine - center_fine)) & 1023
+    ; angleb = (512 + (vis_fine - normal_fine)) & 1023
+    ; $2C = normalangle_fine (set by caller)
+    ; centerangle_fine = playerAngle * 8
+
+    ; Precompute centerangle_fine
+    lda.l playerAngle
+    and #$00FF
+    asl a
+    asl a
+    asl a                ; * 8
+    sta $70              ; centerangle_fine
+
+    ; ScaleFromGlobalAngle for start column (angle a1)
+    ; visangle = a1 + centershort (absolute)
+    lda $4A              ; a1 (view-relative)
+    clc
+    adc $50              ; + centershort = absolute angle
+    jsr ScaleFromGlobalAngle_asm
+    sta $74              ; scale1
+
+    ; ScaleFromGlobalAngle for stop column (angle a2)
+    lda $4C              ; a2 (view-relative, non-inclusive)
+    clc
+    adc $50              ; + centershort
+    jsr ScaleFromGlobalAngle_asm
+    sta $76              ; scale2
+
+    ; scale_step = (scale2 - scale1) / col_count
+    lda $76
+    sec
+    sbc $74              ; scale_diff
+    sta $78
+    lda $54              ; rw_stopx
+    sec
+    sbc $52              ; - rw_x = col_count
+    and #$00FF
+    sta $7A
+    bne @HasCols3
+    jmp @Done
+@HasCols3:
+    ; Signed divide
+    lda $78              ; scale_diff
+    bpl @SdPos
     eor #$FFFF
-    inc a                ; negate (restore sign)
-    sta $60              ; scale_step (negative)
-    bra @StepReady
-@DiffPos:
+    inc a
     sep #$20
 .ACCU 8
     sta.l $4204
     xba
     sta.l $4205
-    lda $5E
+    lda $7A              ; col_count
     sta.l $4206
     rep #$20
 .ACCU 16
@@ -1020,22 +1338,44 @@ renderOneWall:
     nop
     nop
     lda.l $4214
-    sta $60              ; scale_step (positive)
-@StepReady:
+    eor #$FFFF
+    inc a                ; negate
+    sta $7C              ; scale_step (negative)
+    bra @StepOk
+@SdPos:
+    sep #$20
+.ACCU 8
+    sta.l $4204
+    xba
+    sta.l $4205
+    lda $7A
+    sta.l $4206
+    rep #$20
+.ACCU 16
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    lda.l $4214
+    sta $7C              ; scale_step
+@StepOk:
 
-    ; Fill loop: per-column varying height
-    lda $4A              ; sx1
+    ; --- Step 6: Fill columns with per-column height ---
+    lda $52              ; rw_x
     and #$00FF
     tax
-    lda $4C              ; sx2
+    lda $54              ; rw_stopx
     and #$00FF
-    sta $52              ; stop column
-    lda $58              ; current_scale = scale1
-    sta $62
+    sta $7E              ; stop
+    lda $74              ; current_scale = scale1
+    sta $7A              ; reuse $7A for current_scale
     sep #$20
 .ACCU 8
 @FillCol:
-    ; Front-to-back: skip already-drawn columns
     lda.l colDrawn,x
     bne @SkipCol2
     lda #$01
@@ -1043,13 +1383,13 @@ renderOneWall:
     ; Compute wallHeight from current_scale
     rep #$20
 .ACCU 16
-    lda $62              ; current_scale
-    xba                  ; >>8
+    lda $7A              ; current_scale
+    xba                  ; >> 8
     and #$00FF
     cmp #80
-    bcc @NcH2
+    bcc @NcH3
     lda #80
-@NcH2:
+@NcH3:
     lsr a                ; halfH
     sta $4E
     lda #40
@@ -1057,39 +1397,35 @@ renderOneWall:
     sbc $4E
     sep #$20
 .ACCU 8
-    sta.l colDrawStart,x ; drawStart
-
+    sta.l colDrawStart,x
     lda #40
     clc
     adc $4E
     cmp #80
-    bcc @NcE2
+    bcc @NcE3
     lda #80
-@NcE2:
-    sta.l colDrawEnd,x   ; drawEnd
-
+@NcE3:
+    sta.l colDrawEnd,x
     lda $2A
     sta.l colWallColor,x
-
 @SkipCol2:
-    ; Advance scale: current_scale += scale_step
+    ; Advance scale
     rep #$20
 .ACCU 16
-    lda $62
+    lda $7A
     clc
-    adc $60              ; + scale_step
-    sta $62
+    adc $7C              ; + scale_step
+    sta $7A
     sep #$20
 .ACCU 8
-
     inx
     rep #$20
 .ACCU 16
     txa
-    cmp $52
+    cmp $7E
     sep #$20
+.ACCU 8
     bcc @FillCol
-
 @DoneFill:
 @Done:
     plp
@@ -1146,6 +1482,8 @@ renderAllWalls:
     lda #5
     sta $2A
     rep #$20
+    lda #1024
+    sta $2C
     jsr renderOneWall
 @SkipE:
 
@@ -1169,6 +1507,8 @@ renderAllWalls:
     lda #4
     sta $2A
     rep #$20
+    lda #0
+    sta $2C
     jsr renderOneWall
 @SkipW:
 
@@ -1192,6 +1532,8 @@ renderAllWalls:
     lda #5
     sta $2A
     rep #$20
+    lda #1536
+    sta $2C
     jsr renderOneWall
 @SkipS:
 
@@ -1215,6 +1557,8 @@ renderAllWalls:
     lda #5
     sta $2A
     rep #$20
+    lda #512
+    sta $2C
     jsr renderOneWall
 @SkipN:
 
@@ -1238,6 +1582,8 @@ renderAllWalls:
     lda #6
     sta $2A
     rep #$20
+    lda #0
+    sta $2C
     jsr renderOneWall
 @SkipPE:
 
@@ -1261,6 +1607,8 @@ renderAllWalls:
     lda #6
     sta $2A
     rep #$20
+    lda #1024
+    sta $2C
     jsr renderOneWall
 @SkipPW:
 
@@ -1284,6 +1632,8 @@ renderAllWalls:
     lda #7
     sta $2A
     rep #$20
+    lda #1536
+    sta $2C
     jsr renderOneWall
 @SkipPS:
 
@@ -1307,6 +1657,8 @@ renderAllWalls:
     lda #7
     sta $2A
     rep #$20
+    lda #512
+    sta $2C
     jsr renderOneWall
 @SkipPN:
 
