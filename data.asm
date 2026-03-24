@@ -382,7 +382,9 @@ blitPlay:
     rtl
 
 ;; -------------------------------------------------------
-;; clearFramebuffer -- fill screenbuffer with ceiling color
+;; clearFramebuffer -- fill screenbuffer with 3-band test pattern
+;; Column-major: 112 columns of 80 rows each
+;; Rows 0-19=ceiling, 20-59=wall, 60-79=floor
 ;; -------------------------------------------------------
 clearFramebuffer:
     php
@@ -394,13 +396,31 @@ clearFramebuffer:
     lda #FB_BASE
     sta.l $2181
     sep #$20
-    ldy #$0000
-@F:
+    ; 112 columns × 80 rows, sequential via WMADD
+    ldx #$0000           ; column counter
+@Col:
+    ldy #$0000           ; row counter
+@Ceil:
     lda #CEIL_COLOR
     sta.l $2180
     iny
-    cpy #FB_SIZE
-    bne @F
+    cpy #20
+    bne @Ceil
+@Wall:
+    lda #5               ; wall color
+    sta.l $2180
+    iny
+    cpy #60
+    bne @Wall
+@Floor:
+    lda #FLOOR_COLOR
+    sta.l $2180
+    iny
+    cpy #80
+    bne @Floor
+    inx
+    cpx #112
+    bne @Col
     plp
     rtl
 

@@ -24,6 +24,7 @@ typedef signed long long s32;
 #include "../data/palettes.h"
 #include "../data/tables.h"
 #include "../data/map.h"
+#include "../data/bsp_tables.h"
 
 #define SCREEN_W  112
 #define SCREEN_H  80
