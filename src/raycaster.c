@@ -57,6 +57,9 @@ extern void renderColumns(void);
 extern void clearFramebuffer(void);
 extern void dmaFramebuffer(void);
 extern void fillTestWall(void);
+extern void initColumnArrays(void);
+extern void renderOneWall(void);
+extern void renderAllWalls(void);
 extern void testWMADD(void);
 
 /* Player state (8.8 fixed point) */
@@ -200,9 +203,9 @@ u16 frac_mul(u16 frac, u16 val) {
  * Initialize player state
  * ============================================ */
 void initPlayer(void) {
-    /* Start at position (2.5, 2.5) facing east (angle=0) */
-    posX = (2 << 8) | 128;     /* 2.5 in 8.8 */
-    posY = (2 << 8) | 128;     /* 2.5 in 8.8 */
+    /* Start at position (7.5, 5.0) facing east — close to east wall */
+    posX = (7 << 8) | 128;     /* 7.5 in 8.8 */
+    posY = (5 << 8);           /* 5.0 in 8.8 */
     playerAngle = 0;
 
     /* Direction and camera plane from angle */
@@ -513,7 +516,7 @@ int main(void) {
     disableNMI();
     initPlayer();
 
-    fillTestWall();  /* fill column arrays from assembly */
+    renderAllWalls();
 
     while (1) {
         clearFramebuffer();

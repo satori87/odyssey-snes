@@ -23,6 +23,7 @@
 .define FB_SIZE         8960
 .define CEIL_COLOR      16
 .define FLOOR_COLOR     17
+.define MAXZ            8192
 
 initMode7Display:
     php
@@ -309,8 +310,6 @@ initMode7Display:
 ;; -------------------------------------------------------
 blitPlay:
     php
-    phb
-    phd
 
     sep #$20
     rep #$10
@@ -346,31 +345,24 @@ blitPlay:
     lda #FB_BASE
     sta.l $4302
 
-    ; Set DBR=0 for absolute addressing, DP=$4300 for DMA regs
-    sep #$20
-    pea $0000
-    plb
-    plb
-    pea $4300
-    pld
-
-    ; Unrolled 112-column DMA (Noah's Ark style)
-    ; X = DMA length (80), Y = DMA enable ($0001)
-    rep #$30             ; 16-bit A, X, Y
-    ldx #$0050           ; 80
-    ldy #$0001           ; enable ch0
+    ; Unrolled 112-column DMA — all long addressing, no DP/DBR tricks
+    rep #$20
+.ACCU 16
 
 .define _COL 0
 .REPT 112
-    stx $05              ; $4305 = 80 (DMA length via DP)
+    lda #80
+    sta.l $4305          ; DMA length
     lda #(_COL * 128 + 8)
-    sta $2116            ; VMADD (absolute, bank 0)
-    sty $420B            ; trigger DMA (absolute, bank 0)
+    sta.l $2116          ; VMADD
+    lda #$0001
+    sta.l $420B          ; trigger DMA (also writes $00 to $420C)
 .REDEFINE _COL _COL + 1
 .ENDR
 .UNDEFINE _COL
 
     ; Display on
+    sep #$20
     lda #$07
     sta.l $2105
     lda #$01
@@ -550,39 +542,638 @@ columnstart:
 .UNDEFINE _CS
 
 ;; -------------------------------------------------------
-;; fillTestWall -- fill column arrays from assembly
-;; Hardcoded: columns 10-99 get wall from row 20-60, color 5
-;; Bypasses C compiler entirely
+;; initColumnArrays -- clear column arrays (no wall)
 ;; -------------------------------------------------------
-fillTestWall:
+initColumnArrays:
     php
     sep #$20
     rep #$10
-
-    ; Fill columns 0-111 with default (no wall)
     ldx #$0000
-@Init:
+@L:
     lda #40
     sta.l colDrawStart,x
     sta.l colDrawEnd,x
-    lda #CEIL_COLOR
+    lda #$00
     sta.l colWallColor,x
+    sta.l colDrawn,x
     inx
     cpx #112
-    bne @Init
+    bne @L
+    plp
+    rtl
 
-    ; Fill columns 10-99 with wall band
-    ldx #$000A           ; start at column 10
-@Wall:
+;; -------------------------------------------------------
+;; renderOneWall -- project a wall segment, fill column arrays
+;;
+;; Input (DP scratch, set by caller):
+;;   $20/$21 = wall endpoint 1 X (s16, 8.8 fixed)
+;;   $22/$23 = wall endpoint 1 Y
+;;   $24/$25 = wall endpoint 2 X
+;;   $26/$27 = wall endpoint 2 Y
+;;   $28/$29 = perpendicular distance (u16, 8.8)
+;;   $2A     = wall color (u8)
+;;
+;; Uses player state: posX, posY, dirX, dirY (C globals)
+;; Uses colDrawn[] for front-to-back coverage
+;; -------------------------------------------------------
+
+;; Helper: fp_mul_hw — 8.8 fixed multiply using hardware $4202/$4203
+;; Input: A = multiplicand (s16), Y = multiplier (s16)
+;; Output: A = (A * Y) >> 8 (s16)
+;; Clobbers: $30-$35
+fp_mul_hw:
+.ACCU 16
+.INDEX 16
+    ; Handle signs
+    sta $30              ; save A
+    sty $32              ; save Y
+    stz $34              ; neg flag = 0
+    lda $30
+    bpl @APos
+    eor #$FFFF
+    inc a                ; negate A
+    sta $30
+    lda #$0001
+    sta $34              ; neg = 1
+@APos:
+    lda $32
+    bpl @BPos
+    eor #$FFFF
+    inc a
+    sta $32
+    lda $34
+    eor #$0001
+    sta $34              ; flip neg
+@BPos:
+    ; Now $30 = |A| (u16), $32 = |Y| (u16), $34 = neg flag
+    ; result = (ah*bh)<<8 + ah*bl + al*bh + (al*bl)>>8
+    sep #$20
+    lda $31              ; ah
+    sta.l $4202
+    lda $33              ; bh
+    sta.l $4203
+    rep #$20
+    nop                  ; wait for multiply
+    lda.l $4216          ; ah*bh
+    xba                  ; <<8 (swap bytes)
+    and #$FF00           ; keep only high part of <<8
+    sta $36              ; partial result
+
+    sep #$20
+    lda $31              ; ah
+    sta.l $4202
+    lda $32              ; bl
+    sta.l $4203
+    rep #$20
+    nop
+    lda.l $4216          ; ah*bl
+    clc
+    adc $36
+    sta $36
+
+    sep #$20
+    lda $30              ; al
+    sta.l $4202
+    lda $33              ; bh
+    sta.l $4203
+    rep #$20
+    nop
+    lda.l $4216          ; al*bh
+    clc
+    adc $36
+    sta $36
+
+    sep #$20
+    lda $30              ; al
+    sta.l $4202
+    lda $32              ; bl
+    sta.l $4203
+    rep #$20
+    nop
+    lda.l $4216          ; al*bl
+    xba                  ; >>8
+    and #$00FF
+    clc
+    adc $36              ; total result
+    sta $36
+
+.ACCU 16
+    ; Apply sign
+    lda $34
+    beq @NoNeg
+    lda $36
+    eor #$FFFF
+    inc a
+    sta $36
+@NoNeg:
+    lda $36
+    rts
+
+;; projectX_asm — project world point to screen column
+;; Input: $38/$39 = worldX (s16), $3A/$3B = worldY (s16)
+;; Output: A = screen column (s16), or -999 if behind camera
+;; Uses: fp_mul_hw, posX, posY, dirX, dirY
+projectX_asm:
+.ACCU 16
+.INDEX 16
+    ; dx = worldX - posX
+    rep #$20
+    lda $38
+    sec
+    sbc.l posX
+    sta $3C              ; dx
+
+    ; dy = worldY - posY
+    lda $3A
+    sec
+    sbc.l posY
+    sta $3E              ; dy
+
+    ; vz = fp_mul(dx, dirX) + fp_mul(dy, dirY)
+    lda.l dirX
+    tay                  ; Y = dirX
+    lda $3C              ; A = dx
+    jsr fp_mul_hw
+    sta $40              ; fp_mul(dx, dirX)
+
+    lda.l dirY
+    tay                  ; Y = dirY
+    lda $3E              ; A = dy
+    jsr fp_mul_hw        ; fp_mul(dy, dirY)
+    clc
+    adc $40
+    sta $40              ; vz
+
+    ; if vz < 16, behind camera
+    cmp #$0010
+    bcs @InFront
+    lda #$FC19           ; -999
+    rts
+@InFront:
+
+    ; vx = fp_mul(dy, dirX) - fp_mul(dx, dirY)
+    lda.l dirX
+    tay                  ; Y = dirX
+    lda $3E              ; A = dy
+    jsr fp_mul_hw
+    sta $42              ; fp_mul(dy, dirX)
+
+    lda.l dirY
+    tay                  ; Y = dirY
+    lda $3C              ; A = dx
+    jsr fp_mul_hw        ; fp_mul(dx, dirY)
+    sta $44
+    lda $42
+    sec
+    sbc $44
+    sta $42              ; vx
+
+    ; screenX = 56 - (vx * 7) / (vz / 8)
+    ; vz8 = vz >> 3
+    lda $40
+    lsr a
+    lsr a
+    lsr a
+    sta $44              ; vz8
+    beq @Clip
+    ; num = vx * 7
+    lda $42
+    asl a                ; *2
+    adc $42              ; *3 (approximate, carry might be set)
+    asl a                ; *6
+    sec                  ; fix: clear approach
+    ; Redo: vx*7 = vx*8 - vx
+    lda $42
+    asl a
+    asl a
+    asl a                ; vx*8
+    sec
+    sbc $42              ; vx*8 - vx = vx*7
+    sta $46              ; num
+
+    ; Unsigned divide: |num| / vz8
+.ACCU 16
+    bpl @NumPos
+    eor #$FFFF
+    inc a                ; negate
+    sta $46
+    ; Divide
+    sep #$20
+    lda $45              ; num high byte
+    sta.l $4204
+    lda $44              ; WAIT: need to use $4204/$4205 for dividend, $4206 for divisor
+    ; SNES hardware divide: $4204=dividend_lo, $4205=dividend_hi, $4206=divisor (triggers)
+    ; Result after 16 cycles: $4214=quotient, $4216=remainder
+    rep #$20
+    lda $46              ; |num| (unsigned)
+    sep #$20
+    sta.l $4204          ; dividend low
+    xba
+    sta.l $4205          ; dividend high
+    lda $44              ; vz8 low byte (vz8 < 256 for reasonable distances)
+    sta.l $4206          ; divisor — triggers divide
+    rep #$20
+    nop                  ; wait ~16 cycles
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    lda.l $4214          ; quotient
+    ; num was negative: screenX = 56 + quotient
+    clc
+    adc #56
+    rts
+
+@NumPos:
+    ; num positive: divide
+    sep #$20
+    lda $46              ; num low
+    sta.l $4204
+    lda $47              ; num high
+    sta.l $4205
+    lda $44              ; vz8 low byte
+    sta.l $4206
+    rep #$20
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    lda.l $4214          ; quotient
+    ; screenX = 56 - quotient
+    sta $46
+    lda #56
+    sec
+    sbc $46
+    rts
+
+@Clip:
+    lda #$FC19           ; -999 (vz8 == 0)
+    rts
+
+;; -------------------------------------------------------
+;; renderOneWall -- main entry point
+;; Inputs in DP $20-$2A (set by caller before jsl)
+;; -------------------------------------------------------
+renderOneWall:
+    php
+    rep #$30             ; 16-bit A, X, Y
+.ACCU 16
+.INDEX 16
+
+    ; Project endpoint 1
+    lda $20
+    sta $38
+    lda $22
+    sta $3A
+    jsr projectX_asm
+    sta $4A              ; sx1
+
+    ; Project endpoint 2
+    lda $24
+    sta $38
+    lda $26
+    sta $3A
+    jsr projectX_asm
+    sta $4C              ; sx2
+
+    ; Ensure sx1 <= sx2 (swap if needed)
+    lda $4A
+    cmp $4C
+    bcc @NoSwap
+    beq @NoSwap
+    lda $4C
+    ldx $4A
+    sta $4A
+    stx $4C
+@NoSwap:
+
+    ; Clip to screen
+    lda $4C
+    cmp #$0001           ; sx2 <= 0?
+    bpl @NotBehind
+    jmp @Done
+@NotBehind:
+    beq @Done2
+    bra @ChkLeft
+@Done2:
+    jmp @Done
+@ChkLeft:
+    lda $4A
+    cmp #112             ; sx1 >= 112?
+    bmi @Visible
+    jmp @Done
+@Visible:
+
+    ; Clamp
+    lda $4A
+    bpl @NoClampL
+    stz $4A              ; sx1 = 0
+@NoClampL:
+    lda $4C
+    cmp #112
+    bcc @NoClampR
+    lda #112
+    sta $4C
+@NoClampR:
+
+    ; Wall height from scaleatz[perpDist]
+    lda $28              ; perpDist
+    cmp #MAXZ
+    bcc @NoCZ
+    lda #MAXZ-1
+@NoCZ:
+    asl a                ; *2 for word index
+    tax
+    lda.l scaleatz,x     ; scale (u16)
+    xba                  ; >>8 = wallHeight
+    and #$00FF
+    cmp #80
+    bcc @NoClampH
+    lda #80
+@NoClampH:
+    ; halfH = wallHeight / 2
+    lsr a
+    sta $4E              ; halfH
+    ; drawStart = 40 - halfH
+    lda #40
+    sec
+    sbc $4E
+    sep #$20
+    sta $50              ; drawStart (u8)
+    ; drawEnd = 40 + halfH
+    lda #40
+    clc
+    adc $4E
+    cmp #80
+    bcc @NoClampE
+    lda #80
+@NoClampE:
+    sta $51              ; drawEnd (u8)
+
+    ; Fill column arrays for sx1..sx2
+    rep #$20
+    lda $4A              ; sx1
+    and #$00FF
+    tax                  ; X = column index
+    lda $4C              ; sx2
+    and #$00FF
+    sta $52              ; stop column
+    sep #$20
+@FillCol:
+    lda.l colDrawn,x
+    bne @SkipCol         ; already drawn (front-to-back)
+    lda #$01
+    sta.l colDrawn,x
+    lda $50
+    sta.l colDrawStart,x
+    lda $51
+    sta.l colDrawEnd,x
+    lda $2A              ; wall color
+    sta.l colWallColor,x
+@SkipCol:
+    inx
+    rep #$20
+    txa
+    cmp $52
+    sep #$20
+    bcc @FillCol
+
+@Done:
+    plp
+    rtl
+
+;; colDrawn: 112 bytes in RAM (allocated in .ramsection at end of file)
+
+;; -------------------------------------------------------
+;; renderAllWalls -- project all 8 walls for the 10x10 map
+;; Calls initColumnArrays then renderOneWall for each wall
+;; Uses posX/posY from C globals
+;; -------------------------------------------------------
+renderAllWalls:
+    php
+    rep #$30
+.ACCU 16
+.INDEX 16
+    ; SAME as proven fillTestWall — init + fill columns 10-99
+    sep #$20
+    ldx #$0000
+@Init2:
+    lda #40
+    sta.l colDrawStart,x
+    sta.l colDrawEnd,x
+    lda #$00
+    sta.l colWallColor,x
+    sta.l colDrawn,x
+    inx
+    cpx #112
+    bne @Init2
+
+    ldx #$000A
+@Wall2:
     lda #20
     sta.l colDrawStart,x
     lda #60
     sta.l colDrawEnd,x
-    lda #5               ; wall color
+    lda #5
     sta.l colWallColor,x
     inx
-    cpx #100             ; stop at column 100
-    bne @Wall
+    cpx #100
+    bne @Wall2
+    rep #$20
+    jmp @SkipPN
+
+    ; === East outer wall at col=9 (X=2304): visible when posX < 2304 ===
+    lda.l posX
+    cmp #2304
+    bcs @SkipE
+    ; perpDist = 2304 - posX
+    lda #2304
+    sec
+    sbc.l posX
+    sta $28              ; perpDist
+    ; endpoints: (2304, 256) to (2304, 2304)
+    lda #2304
+    sta $20              ; x1
+    lda #256
+    sta $22              ; y1
+    lda #2304
+    sta $24              ; x2
+    lda #2304
+    sta $26              ; y2
+    sep #$20
+    lda #4               ; wall color
+    sta $2A
+    rep #$20
+    jsl renderOneWall
+@SkipE:
+
+    ; === West outer wall at col=1 (X=256): visible when posX > 256 ===
+    lda.l posX
+    cmp #257
+    bcc @SkipW
+    lda.l posX
+    sec
+    sbc #256
+    sta $28
+    lda #256
+    sta $20
+    lda #256
+    sta $22
+    lda #256
+    sta $24
+    lda #2304
+    sta $26
+    sep #$20
+    lda #4
+    sta $2A
+    rep #$20
+    jsl renderOneWall
+@SkipW:
+
+    ; === South outer wall at row=1 (Y=256): visible when posY > 256 ===
+    lda.l posY
+    cmp #257
+    bcc @SkipS
+    lda.l posY
+    sec
+    sbc #256
+    sta $28
+    lda #256
+    sta $20
+    lda #256
+    sta $22
+    lda #2304
+    sta $24
+    lda #256
+    sta $26
+    sep #$20
+    lda #5
+    sta $2A
+    rep #$20
+    jsl renderOneWall
+@SkipS:
+
+    ; === North outer wall at row=9 (Y=2304): visible when posY < 2304 ===
+    lda.l posY
+    cmp #2304
+    bcs @SkipN
+    lda #2304
+    sec
+    sbc.l posY
+    sta $28
+    lda #256
+    sta $20
+    lda #2304
+    sta $22
+    lda #2304
+    sta $24
+    lda #2304
+    sta $26
+    sep #$20
+    lda #5
+    sta $2A
+    rep #$20
+    jsl renderOneWall
+@SkipN:
+
+    ; === Pillar east face at col=6 (X=1536): visible when posX > 1536 ===
+    lda.l posX
+    cmp #1537
+    bcc @SkipPE
+    lda.l posX
+    sec
+    sbc #1536
+    sta $28
+    lda #1536
+    sta $20
+    lda #1024
+    sta $22
+    lda #1536
+    sta $24
+    lda #1536
+    sta $26
+    sep #$20
+    lda #6
+    sta $2A
+    rep #$20
+    jsl renderOneWall
+@SkipPE:
+
+    ; === Pillar west face at col=4 (X=1024): visible when posX < 1024 ===
+    lda.l posX
+    cmp #1024
+    bcs @SkipPW
+    lda #1024
+    sec
+    sbc.l posX
+    sta $28
+    lda #1024
+    sta $20
+    lda #1024
+    sta $22
+    lda #1024
+    sta $24
+    lda #1536
+    sta $26
+    sep #$20
+    lda #6
+    sta $2A
+    rep #$20
+    jsl renderOneWall
+@SkipPW:
+
+    ; === Pillar south face at row=6 (Y=1536): visible when posY > 1536 ===
+    lda.l posY
+    cmp #1537
+    bcc @SkipPS
+    lda.l posY
+    sec
+    sbc #1536
+    sta $28
+    lda #1024
+    sta $20
+    lda #1536
+    sta $22
+    lda #1536
+    sta $24
+    lda #1536
+    sta $26
+    sep #$20
+    lda #7
+    sta $2A
+    rep #$20
+    jsl renderOneWall
+@SkipPS:
+
+    ; === Pillar north face at row=4 (Y=1024): visible when posY < 1024 ===
+    lda.l posY
+    cmp #1024
+    bcs @SkipPN
+    lda #1024
+    sec
+    sbc.l posY
+    sta $28
+    lda #1024
+    sta $20
+    lda #1024
+    sta $22
+    lda #1536
+    sta $24
+    lda #1024
+    sta $26
+    sep #$20
+    lda #7
+    sta $2A
+    rep #$20
+    jsl renderOneWall
+@SkipPN:
 
     plp
     rtl
@@ -623,18 +1214,18 @@ zero_byte: .db 0
 ;; -------------------------------------------------------
 playback_bg:
 .REPT 112
-; 20 bytes ceiling
-.REPT 20
+; 40 bytes ceiling
+.REPT 40
 .db CEIL_COLOR
 .ENDR
-; 40 bytes wall
+; 40 bytes floor
 .REPT 40
-.db 5
-.ENDR
-; 20 bytes floor
-.REPT 20
 .db FLOOR_COLOR
 .ENDR
 .ENDR
 
+.ends
+
+.ramsection ".coldrawn" slot 2 bank 126
+colDrawn dsb 112
 .ends
