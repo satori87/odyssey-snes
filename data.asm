@@ -877,10 +877,11 @@ renderOneWall:
     jsr projectX_asm
     sta $4C              ; sx2
 
-    ; Ensure sx1 <= sx2 (swap if needed)
+    ; Signed sort: ensure sx1 <= sx2
     lda $4A
-    cmp $4C
-    bcc @NoSwap
+    sec
+    sbc $4C              ; sx1 - sx2 (signed)
+    bmi @NoSwap          ; negative → sx1 < sx2 → correct
     beq @NoSwap
     lda $4C
     ldx $4A
@@ -961,10 +962,7 @@ renderOneWall:
     sta $52              ; stop column
     sep #$20
 @FillCol:
-    lda.l colDrawn,x
-    bne @SkipCol         ; already drawn (front-to-back)
-    lda #$01
-    sta.l colDrawn,x
+    ; Skip colDrawn check — allow overdraw (back-to-front rendering)
     lda $50
     sta.l colDrawStart,x
     lda $51
@@ -981,7 +979,7 @@ renderOneWall:
 
 @Done:
     plp
-    rtl
+    rts                  ; called via JSR from renderAllWalls (same bank)
 
 ;; colDrawn: 112 bytes in RAM (allocated in .ramsection at end of file)
 
@@ -1010,171 +1008,34 @@ renderAllWalls:
     bne @Init2
     rep #$20
 
-    ; === Project east wall (X=2304) ===
+    ; === All 8 walls via jsr renderOneWall ===
 .ACCU 16
 .INDEX 16
+
+    ; --- East wall (col=9, X=2304): player east (posX < 2304) ---
+    lda.l posX
+    cmp #2304
+    bcs @SkipE
     lda #2304
     sec
     sbc.l posX
     sta $28
-    cmp #$0001
-    bcs @NotBehind0
-    jmp @SkipPN
-@NotBehind0:
-
-    ; Project endpoint 1: (2304, 256)
     lda #2304
-    sta $38
+    sta $20
     lda #256
-    sta $3A
-    jsr projectX_asm
-    sta $4A              ; sx1
-
-    ; Project endpoint 2: (2304, 2304)
+    sta $22
     lda #2304
-    sta $38
+    sta $24
     lda #2304
-    sta $3A
-    jsr projectX_asm
-    sta $4C              ; sx2
-
-    ; Both projections returned — continue to sort/clamp/fill
-
-    ; Signed sort: ensure sx1 <= sx2
-    lda $4A
-    sec
-    sbc $4C              ; sx1 - sx2 (signed)
-    bmi @NoSwp           ; negative → sx1 < sx2 → correct order
-    beq @NoSwp           ; equal → no swap needed
-    ; sx1 > sx2 → swap
-    lda $4C
-    ldx $4A
-    sta $4A
-    stx $4C
-@NoSwp:
-    lda $4C
-    cmp #$0001
-    bpl @NotBhd
-    jmp @SkipPN
-@NotBhd:
-    lda $4A
-    cmp #112
-    bmi @Vis
-    jmp @SkipPN
-@Vis:
-    lda $4A
-    bpl @NcL
-    stz $4A
-@NcL:
-    lda $4C
-    cmp #112
-    bcc @NcR
-    lda #112
-    sta $4C
-@NcR:
-
-    ; Wall height from scaleatz
-    lda $28
-    cmp #MAXZ
-    bcc @NcZ
-    lda #MAXZ-1
-@NcZ:
-    asl a
-    tax
-    lda.l scaleatz,x
-    xba
-    and #$00FF
-    cmp #80
-    bcc @NcH
-    lda #80
-@NcH:
-    lsr a                ; halfH
-    sta $4E
-    lda #40
-    sec
-    sbc $4E
+    sta $26
     sep #$20
-    sta $50              ; drawStart
-    lda #40
-    clc
-    adc $4E
-    cmp #80
-    bcc @NcE
-    lda #80
-@NcE:
-    sta $51              ; drawEnd
-
-    ; Fill columns sx1..sx2
-    rep #$20
-    lda $4A
-    and #$00FF
-    tax
-    lda $4C
-    and #$00FF
-    sta $52
-    sep #$20
-@Fcol:
-    lda.l colDrawn,x
-    bne @Fskp
-    lda #$01
-    sta.l colDrawn,x
-    lda $50
-    sta.l colDrawStart,x
-    lda $51
-    sta.l colDrawEnd,x
-    lda #5               ; gray wall
-    sta.l colWallColor,x
-@Fskp:
-    inx
-    rep #$20
-    txa
-    cmp $52
-    sep #$20
-    bcc @Fcol
-
-    ; DEBUG: force column 56 as proof code reached here
-    sep #$20
-.ACCU 8
-    ldx #$0038
-    lda #10
-    sta.l colDrawStart,x
-    lda #70
-    sta.l colDrawEnd,x
     lda #5
-    sta.l colWallColor,x
-    lda #$01
-    sta.l colDrawn,x
-
-    rep #$20
-.ACCU 16
-    jmp @SkipPN
-
-    ; === East outer wall at col=9 (X=2304): visible when posX < 2304 ===
-    lda.l posX
-    cmp #2304
-    bcs @SkipE
-    ; perpDist = 2304 - posX
-    lda #2304
-    sec
-    sbc.l posX
-    sta $28              ; perpDist
-    ; endpoints: (2304, 256) to (2304, 2304)
-    lda #2304
-    sta $20              ; x1
-    lda #256
-    sta $22              ; y1
-    lda #2304
-    sta $24              ; x2
-    lda #2304
-    sta $26              ; y2
-    sep #$20
-    lda #5               ; gray wall color (visible)
     sta $2A
     rep #$20
-    jsl renderOneWall
+    jsr renderOneWall
 @SkipE:
 
-    ; === West outer wall at col=1 (X=256): visible when posX > 256 ===
+    ; --- West wall (col=1, X=256): player east (posX > 256) ---
     lda.l posX
     cmp #257
     bcc @SkipW
@@ -1194,10 +1055,10 @@ renderAllWalls:
     lda #4
     sta $2A
     rep #$20
-    jsl renderOneWall
+    jsr renderOneWall
 @SkipW:
 
-    ; === South outer wall at row=1 (Y=256): visible when posY > 256 ===
+    ; --- South wall (row=1, Y=256): player south (posY > 256) ---
     lda.l posY
     cmp #257
     bcc @SkipS
@@ -1217,10 +1078,10 @@ renderAllWalls:
     lda #5
     sta $2A
     rep #$20
-    jsl renderOneWall
+    jsr renderOneWall
 @SkipS:
 
-    ; === North outer wall at row=9 (Y=2304): visible when posY < 2304 ===
+    ; --- North wall (row=9, Y=2304): player north (posY < 2304) ---
     lda.l posY
     cmp #2304
     bcs @SkipN
@@ -1240,10 +1101,10 @@ renderAllWalls:
     lda #5
     sta $2A
     rep #$20
-    jsl renderOneWall
+    jsr renderOneWall
 @SkipN:
 
-    ; === Pillar east face at col=6 (X=1536): visible when posX > 1536 ===
+    ; --- Pillar east (col=6, X=1536): player east (posX > 1536) ---
     lda.l posX
     cmp #1537
     bcc @SkipPE
@@ -1263,10 +1124,10 @@ renderAllWalls:
     lda #6
     sta $2A
     rep #$20
-    jsl renderOneWall
+    jsr renderOneWall
 @SkipPE:
 
-    ; === Pillar west face at col=4 (X=1024): visible when posX < 1024 ===
+    ; --- Pillar west (col=4, X=1024): player west (posX < 1024) ---
     lda.l posX
     cmp #1024
     bcs @SkipPW
@@ -1286,10 +1147,10 @@ renderAllWalls:
     lda #6
     sta $2A
     rep #$20
-    jsl renderOneWall
+    jsr renderOneWall
 @SkipPW:
 
-    ; === Pillar south face at row=6 (Y=1536): visible when posY > 1536 ===
+    ; --- Pillar south (row=6, Y=1536): player south (posY > 1536) ---
     lda.l posY
     cmp #1537
     bcc @SkipPS
@@ -1309,10 +1170,10 @@ renderAllWalls:
     lda #7
     sta $2A
     rep #$20
-    jsl renderOneWall
+    jsr renderOneWall
 @SkipPS:
 
-    ; === Pillar north face at row=4 (Y=1024): visible when posY < 1024 ===
+    ; --- Pillar north (row=4, Y=1024): player north (posY < 1024) ---
     lda.l posY
     cmp #1024
     bcs @SkipPN
@@ -1332,7 +1193,7 @@ renderAllWalls:
     lda #7
     sta $2A
     rep #$20
-    jsl renderOneWall
+    jsr renderOneWall
 @SkipPN:
 
     plp

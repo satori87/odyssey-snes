@@ -203,8 +203,8 @@ u16 frac_mul(u16 frac, u16 val) {
  * Initialize player state
  * ============================================ */
 void initPlayer(void) {
-    /* Start at position (7.5, 5.0) facing east — close to east wall */
-    posX = (7 << 8) | 128;     /* 7.5 in 8.8 */
+    /* Start at center (5.0, 5.0) facing east — see multiple walls */
+    posX = (5 << 8);           /* 5.0 in 8.8 */
     posY = (5 << 8);           /* 5.0 in 8.8 */
     playerAngle = 0;
 
