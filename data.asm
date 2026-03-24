@@ -905,11 +905,7 @@ PointToAngle_asm:
     rts
 @Oct5:
     ; ay >= ax → octant 5
-    lda $64
-    sta $66              ; swap: pass (ax, ay) as (y, x)
-    lda.l posY           ; reload ay... actually just swap
-    ; Simpler: call with ay,ax reversed
-    jsr @SlopeCalcRev    ; A = AngleFromSlope(ax, ay)
+    jsr @SlopeCalcRev    ; AngleFromSlope(ax, ay) — $64/$66 already correct
     sta $68
     lda #$C000           ; ANG270
     sec
