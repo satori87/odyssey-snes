@@ -822,7 +822,7 @@ projectX_asm:
     rts
 
 @NumPos:
-    ; num positive: divide
+    ; num positive: screenX = 56 - quotient
     sep #$20
     lda $46              ; num low
     sta.l $4204
@@ -840,9 +840,10 @@ projectX_asm:
     nop
     nop
     lda.l $4214          ; quotient
-    ; screenX = 56 - quotient
     sta $46
     lda #56
+    sec
+    sbc $46
     sec
     sbc $46
     rts
