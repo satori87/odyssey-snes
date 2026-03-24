@@ -1392,6 +1392,13 @@ renderOneWall:
     bne @SkipCol2
     lda #$01
     sta.l colDrawn,x
+    rep #$20
+.ACCU 16
+    lda.l colsFilled
+    inc a
+    sta.l colsFilled
+    sep #$20
+.ACCU 8
     ; Compute wallHeight from current_scale
     rep #$20
 .ACCU 16
@@ -1445,17 +1452,374 @@ renderOneWall:
 
 ;; colDrawn: 112 bytes in RAM (allocated in .ramsection at end of file)
 
+;; ===============================================================
+;; BSP ROM data (44 entries × 6 bytes = 264 bytes)
+;; Node: plane(1), dir(1), child0_lo(1), child0_hi(1), child1_lo(1), child1_hi(1)
+;; Seg:  plane(1), dir(1), min(1), max(1), texture(1), area(1)
+;; Coordinates in half-tiles: world = value << 7
+;; ===============================================================
+bsp_rom_data:
+    .db 8, 1, 1, 0, 30, 0       ; [0] node: plane=8, vert, children=[1,30]
+    .db 12, 1, 2, 0, 16, 0      ; [1] node: plane=12, vert, children=[2,16]
+    .db 8, 0, 3, 0, 12, 0       ; [2] node: plane=8, horiz, children=[3,12]
+    .db 12, 0, 4, 0, 8, 0       ; [3] node: plane=12, horiz, children=[4,8]
+    .db 18, 131, 2, 18, 1, 0    ; [4] seg: W, span=2-18, tex=1
+    .db 12, 129, 8, 12, 2, 0    ; [5] seg: E, span=8-12, tex=2
+    .db 12, 130, 8, 12, 2, 0    ; [6] seg: S, span=8-12, tex=2
+    .db 18, 192, 2, 18, 1, 0    ; [7] seg: N+last, span=2-18, tex=1
+    .db 18, 131, 2, 18, 1, 0    ; [8] seg: W, span=2-18, tex=1
+    .db 8, 128, 8, 12, 2, 0     ; [9] seg: N, span=8-12, tex=2
+    .db 12, 129, 8, 12, 2, 0    ; [10] seg: E, span=8-12, tex=2
+    .db 12, 194, 8, 12, 2, 0    ; [11] seg: S+last, span=8-12, tex=2
+    .db 2, 130, 2, 18, 1, 0     ; [12] seg: S, span=2-18, tex=1
+    .db 18, 131, 2, 18, 1, 0    ; [13] seg: W, span=2-18, tex=1
+    .db 8, 128, 8, 12, 2, 0     ; [14] seg: N, span=8-12, tex=2
+    .db 12, 193, 8, 12, 2, 0    ; [15] seg: E+last, span=8-12, tex=2
+    .db 8, 0, 17, 0, 26, 0      ; [16] node: plane=8, horiz, children=[17,26]
+    .db 12, 0, 18, 0, 22, 0     ; [17] node: plane=12, horiz, children=[18,22]
+    .db 8, 131, 8, 12, 2, 0     ; [18] seg: W, span=8-12, tex=2
+    .db 12, 129, 8, 12, 2, 0    ; [19] seg: E, span=8-12, tex=2
+    .db 12, 130, 8, 12, 2, 0    ; [20] seg: S, span=8-12, tex=2
+    .db 18, 192, 2, 18, 1, 0    ; [21] seg: N+last, span=2-18, tex=1
+    .db 8, 128, 8, 12, 2, 0     ; [22] seg: N, span=8-12, tex=2
+    .db 8, 131, 8, 12, 2, 0     ; [23] seg: W, span=8-12, tex=2
+    .db 12, 129, 8, 12, 2, 0    ; [24] seg: E, span=8-12, tex=2
+    .db 12, 194, 8, 12, 2, 0    ; [25] seg: S+last, span=8-12, tex=2
+    .db 2, 130, 2, 18, 1, 0     ; [26] seg: S, span=2-18, tex=1
+    .db 8, 128, 8, 12, 2, 0     ; [27] seg: N, span=8-12, tex=2
+    .db 8, 131, 8, 12, 2, 0     ; [28] seg: W, span=8-12, tex=2
+    .db 12, 193, 8, 12, 2, 0    ; [29] seg: E+last, span=8-12, tex=2
+    .db 8, 0, 31, 0, 40, 0      ; [30] node: plane=8, horiz, children=[31,40]
+    .db 12, 0, 32, 0, 36, 0     ; [31] node: plane=12, horiz, children=[32,36]
+    .db 2, 129, 2, 18, 1, 0     ; [32] seg: E, span=2-18, tex=1
+    .db 8, 131, 8, 12, 2, 0     ; [33] seg: W, span=8-12, tex=2
+    .db 12, 130, 8, 12, 2, 0    ; [34] seg: S, span=8-12, tex=2
+    .db 18, 192, 2, 18, 1, 0    ; [35] seg: N+last, span=2-18, tex=1
+    .db 2, 129, 2, 18, 1, 0     ; [36] seg: E, span=2-18, tex=1
+    .db 8, 128, 8, 12, 2, 0     ; [37] seg: N, span=8-12, tex=2
+    .db 8, 131, 8, 12, 2, 0     ; [38] seg: W, span=8-12, tex=2
+    .db 12, 194, 8, 12, 2, 0    ; [39] seg: S+last, span=8-12, tex=2
+    .db 2, 130, 2, 18, 1, 0     ; [40] seg: S, span=2-18, tex=1
+    .db 2, 129, 2, 18, 1, 0     ; [41] seg: E, span=2-18, tex=1
+    .db 8, 128, 8, 12, 2, 0     ; [42] seg: N, span=8-12, tex=2
+    .db 8, 195, 8, 12, 2, 0     ; [43] seg: W+last, span=8-12, tex=2
+
+;; Color table: texColors[texture*2 + (direction & 1)]
+;; direction & 1: 0 = N/S face (dark), 1 = E/W face (bright)
+texColors:
+    .db 0, 0             ; texture 0 (unused)
+    .db 4, 5             ; texture 1: dark=4, bright=5 (outer walls)
+    .db 7, 6             ; texture 2: dark=7, bright=6 (pillar)
+
 ;; -------------------------------------------------------
-;; renderAllWalls -- project all 8 walls for the 10x10 map
-;; Calls initColumnArrays then renderOneWall for each wall
-;; Uses posX/posY from C globals
+;; drawOneSeg -- translate BSP segment into renderOneWall call
+;; Input: X = byte offset into bsp_rom_data (entry_index * 6)
+;; BSP directions: 0=N face(fixedY,player north), 1=E(fixedX,player east),
+;;                 2=S(fixedY,player south), 3=W(fixedX,player west)
+;; -------------------------------------------------------
+drawOneSeg:
+    rep #$30
+.ACCU 16
+.INDEX 16
+    ; Extract segment fields
+    ; segplane = plane << 7  (halftile to world coords)
+    lda.l bsp_rom_data+0,x
+    and #$00FF
+    xba
+    lsr a
+    sta $80              ; segplane
+
+    ; direction = dir & 3
+    lda.l bsp_rom_data+1,x
+    and #$0003
+    sta $82              ; direction (0-3)
+
+    ; mintex = min << 7
+    lda.l bsp_rom_data+2,x
+    and #$00FF
+    xba
+    lsr a
+    sta $84              ; mintex
+
+    ; maxtex = max << 7
+    lda.l bsp_rom_data+3,x
+    and #$00FF
+    xba
+    lsr a
+    sta $86              ; maxtex
+
+    ; texture
+    lda.l bsp_rom_data+4,x
+    and #$00FF
+    sta $88              ; texture (1 or 2)
+
+    ; Color lookup: texColors[texture * 2 + (direction & 1)]
+    asl a                ; texture * 2
+    sta $8A
+    lda $82
+    and #$0001           ; 0=N/S(dark), 1=E/W(bright)
+    clc
+    adc $8A              ; index
+    tax
+    sep #$20
+.ACCU 8
+    lda.l texColors,x
+    sta $2A              ; wall color
+    rep #$20
+.ACCU 16
+
+    ; Switch on direction
+    lda $82
+    beq @DirN
+    cmp #1
+    beq @DirE
+    cmp #2
+    beq @DirS
+    ; fall through = dir 3 (West)
+
+@DirW:  ; W face: fixed X, player west (posX < segplane)
+    lda $80
+    sec
+    sbc.l posX
+    beq @SkipW
+    bpl @VisW
+@SkipW: rts
+@VisW:
+    sta $28              ; perpDist = segplane - posX
+    lda $80
+    sta $20    ; x1 = segplane
+    lda $84
+    sta $22    ; y1 = mintex (di_south: mintex first)
+    lda $80
+    sta $24    ; x2 = segplane
+    lda $86
+    sta $26    ; y2 = maxtex
+    lda #0  
+    sta $2C   ; normalangle = 0
+    jsr renderOneWall
+    rts
+
+@DirN:  ; N face: fixed Y, player north (posY < segplane)
+    lda $80
+    sec
+    sbc.l posY
+    beq @SkipN
+    bpl @VisN
+@SkipN: rts
+@VisN:
+    sta $28              ; perpDist = segplane - posY
+    lda $86
+    sta $20    ; x1 = maxtex (di_west: maxtex first)
+    lda $80
+    sta $22    ; y1 = segplane
+    lda $84
+    sta $24    ; x2 = mintex
+    lda $80
+    sta $26    ; y2 = segplane
+    lda #1536
+    sta $2C  ; normalangle = 3*512
+    jsr renderOneWall
+    rts
+
+@DirE:  ; E face: fixed X, player east (posX > segplane)
+    lda.l posX
+    sec
+    sbc $80
+    beq @SkipE
+    bpl @VisE
+@SkipE: rts
+@VisE:
+    sta $28              ; perpDist = posX - segplane
+    lda $80
+    sta $20    ; x1 = segplane
+    lda $86
+    sta $22    ; y1 = maxtex (di_north: maxtex first)
+    lda $80
+    sta $24    ; x2 = segplane
+    lda $84
+    sta $26    ; y2 = mintex
+    lda #1024
+    sta $2C  ; normalangle = 2*512
+    jsr renderOneWall
+    rts
+
+@DirS:  ; S face: fixed Y, player south (posY > segplane)
+    lda.l posY
+    sec
+    sbc $80
+    beq @SkipS
+    bpl @VisS
+@SkipS: rts
+@VisS:
+    sta $28              ; perpDist = posY - segplane
+    lda $84
+    sta $20    ; x1 = mintex (di_east: mintex first)
+    lda $80
+    sta $22    ; y1 = segplane
+    lda $86
+    sta $24    ; x2 = maxtex
+    lda $80
+    sta $26    ; y2 = segplane
+    lda #512
+    sta $2C   ; normalangle = 1*512
+    jsr renderOneWall
+    rts
+
+@Done:
+    rts
+
+;; -------------------------------------------------------
+;; terminalNode -- iterate segment chain, call drawOneSeg for each
+;; Input: X = byte offset of first segment in bsp_rom_data
+;; -------------------------------------------------------
+terminalNode:
+    rep #$30
+.ACCU 16
+.INDEX 16
+@SegLoop:
+    phx                  ; save offset (drawOneSeg clobbers X)
+    jsr drawOneSeg
+    plx                  ; restore offset
+    ; Check DIR_LASTSEGFLAG ($40) in dir byte
+    sep #$20
+.ACCU 8
+    lda.l bsp_rom_data+1,x
+    and #$40
+    bne @SegDone
+    rep #$20
+.ACCU 16
+    ; Advance to next entry: X += 6
+    txa
+    clc
+    adc #6
+    tax
+    bra @SegLoop
+@SegDone:
+    rep #$20
+.ACCU 16
+    rts
+
+;; -------------------------------------------------------
+;; renderBSPNode -- recursive BSP traversal (JSR-based, max depth ~5)
+;; Input: X = byte offset into bsp_rom_data
+;; Front-to-back order: render near child first, far child second
+;; -------------------------------------------------------
+renderBSPNode:
+    rep #$30
+.ACCU 16
+.INDEX 16
+    ; Early-out: all 112 columns filled → stop traversal
+    lda.l colsFilled
+    cmp #112
+    bcc @NotFull
+    rts
+@NotFull:
+    ; Check if segment (DIR_SEGFLAG = $80 in dir byte)
+    sep #$20
+.ACCU 8
+    lda.l bsp_rom_data+1,x
+    bmi @IsSeg           ; bit 7 set → segment chain
+    rep #$20
+.ACCU 16
+
+    ; It's a node — read split plane coordinate
+    lda.l bsp_rom_data+0,x
+    and #$00FF
+    xba
+    lsr a                ; coordinate = plane << 7
+    sta $90              ; split coordinate (world)
+
+    ; Read children (16-bit indices)
+    lda.l bsp_rom_data+2,x
+    and #$00FF           ; child0 index (front in BSP builder = greater side)
+    sta $92
+    lda.l bsp_rom_data+4,x
+    and #$00FF           ; child1 index (back in BSP builder = lesser side)
+    sta $94
+
+    ; Determine near/far based on player position vs split
+    sep #$20
+.ACCU 8
+    lda.l bsp_rom_data+1,x  ; dir: 0=horiz(Y split), 1=vert(X split)
+    rep #$20
+.ACCU 16
+    and #$0001
+    bne @VertSplit
+
+@HorizSplit:
+    ; Horizontal split: compare posY vs coordinate
+    ; child0 = greater Y side, child1 = lesser Y side
+    lda.l posY
+    cmp $90
+    bcc @NearChild1      ; posY < coordinate → player on lesser side → near=child1
+    beq @NearChild1
+    ; posY > coordinate → near=child0, far=child1
+    lda $92
+    sta $96    ; near = child0
+    lda $94              ; far = child1
+    bra @DoTraverse
+
+@VertSplit:
+    ; Vertical split: compare posX vs coordinate
+    ; child0 = greater X side, child1 = lesser X side
+    lda.l posX
+    cmp $90
+    bcc @NearChild1      ; posX < coordinate → near=child1
+    beq @NearChild1
+    lda $92
+    sta $96    ; near = child0
+    lda $94              ; far = child1
+    bra @DoTraverse
+
+@NearChild1:
+    lda $94
+    sta $96    ; near = child1
+    lda $92              ; far = child0
+
+@DoTraverse:
+    ; A = far child index, $96 = near child index
+    ; Push far child index for later
+    pha
+
+    ; Convert near index to byte offset (index * 6)
+    lda $96
+    asl a                ; *2
+    sta $98
+    asl a                ; *4
+    clc
+    adc $98              ; *6
+    tax
+    ; Recurse into near child
+    jsr renderBSPNode
+
+    ; Pop far child index, convert to byte offset
+    pla
+    asl a
+    sta $98
+    asl a
+    clc
+    adc $98
+    tax
+    ; Recurse into far child
+    jsr renderBSPNode
+    rts
+
+@IsSeg:
+    rep #$20
+.ACCU 16
+    jsr terminalNode
+    rts
+
+;; -------------------------------------------------------
+;; renderAllWalls -- BSP-driven wall rendering
+;; Traverses BSP tree front-to-back, calls renderOneWall for each segment
 ;; -------------------------------------------------------
 renderAllWalls:
     php
     rep #$30
 .ACCU 16
 .INDEX 16
-    ; Init arrays (inlined, no jsl)
+    ; Init column arrays
     sep #$20
     ldx #$0000
 @Init2:
@@ -1469,215 +1833,12 @@ renderAllWalls:
     cpx #112
     bne @Init2
     rep #$20
+    lda #$0000
+    sta.l colsFilled     ; 0 columns filled
 
-    ; === All 8 walls — pillar walls FIRST for correct colDrawn occlusion ===
-    ; Endpoint ordering matches Noah's P_DrawSeg per-direction convention:
-    ;   di_north (fixed X, player east): PTA(segplane,maxtex), PTA(segplane,mintex)
-    ;   di_south (fixed X, player west): PTA(segplane,mintex), PTA(segplane,maxtex)
-    ;   di_east  (fixed Y, player south): PTA(mintex,segplane), PTA(maxtex,segplane)
-    ;   di_west  (fixed Y, player north): PTA(maxtex,segplane), PTA(mintex,segplane)
-.ACCU 16
-.INDEX 16
-
-    ; --- Pillar east (X=1536, Y 1024-1536): di_north (player east, posX > 1536) ---
-    lda.l posX
-    cmp #1537
-    bcc @SkipPE
-    lda.l posX
-    sec
-    sbc #1536
-    sta $28              ; perpDist = posX - 1536
-    lda #1536
-    sta $20              ; x1 = segplane
-    lda #1536
-    sta $22              ; y1 = maxtex (di_north: maxtex first)
-    lda #1536
-    sta $24              ; x2 = segplane
-    lda #1024
-    sta $26              ; y2 = mintex
-    sep #$20
-    lda #6
-    sta $2A
-    rep #$20
-    lda #1024
-    sta $2C              ; normalangle_fine = 2*FINEANGLES/4
-    jsr renderOneWall
-@SkipPE:
-
-    ; --- Pillar west (X=1024, Y 1024-1536): di_south (player west, posX < 1024) ---
-    lda.l posX
-    cmp #1024
-    bcs @SkipPW
-    lda #1024
-    sec
-    sbc.l posX
-    sta $28              ; perpDist = 1024 - posX
-    lda #1024
-    sta $20              ; x1 = segplane
-    lda #1024
-    sta $22              ; y1 = mintex (di_south: mintex first)
-    lda #1024
-    sta $24              ; x2 = segplane
-    lda #1536
-    sta $26              ; y2 = maxtex
-    sep #$20
-    lda #6
-    sta $2A
-    rep #$20
-    lda #0
-    sta $2C              ; normalangle_fine = 0*FINEANGLES/4
-    jsr renderOneWall
-@SkipPW:
-
-    ; --- Pillar south (Y=1536, X 1024-1536): di_east (player south, posY > 1536) ---
-    lda.l posY
-    cmp #1537
-    bcc @SkipPS
-    lda.l posY
-    sec
-    sbc #1536
-    sta $28              ; perpDist = posY - 1536
-    lda #1024
-    sta $20              ; x1 = mintex (di_east: mintex first)
-    lda #1536
-    sta $22              ; y1 = segplane
-    lda #1536
-    sta $24              ; x2 = maxtex
-    lda #1536
-    sta $26              ; y2 = segplane
-    sep #$20
-    lda #7
-    sta $2A
-    rep #$20
-    lda #512
-    sta $2C              ; normalangle_fine = 1*FINEANGLES/4
-    jsr renderOneWall
-@SkipPS:
-
-    ; --- Pillar north (Y=1024, X 1024-1536): di_west (player north, posY < 1024) ---
-    lda.l posY
-    cmp #1024
-    bcs @SkipPN
-    lda #1024
-    sec
-    sbc.l posY
-    sta $28              ; perpDist = 1024 - posY
-    lda #1536
-    sta $20              ; x1 = maxtex (di_west: maxtex first)
-    lda #1024
-    sta $22              ; y1 = segplane
-    lda #1024
-    sta $24              ; x2 = mintex
-    lda #1024
-    sta $26              ; y2 = segplane
-    sep #$20
-    lda #7
-    sta $2A
-    rep #$20
-    lda #1536
-    sta $2C              ; normalangle_fine = 3*FINEANGLES/4
-    jsr renderOneWall
-@SkipPN:
-
-    ; --- East wall (X=2304, Y 256-2304): di_south (player west, posX < 2304) ---
-    lda.l posX
-    cmp #2304
-    bcs @SkipE
-    lda #2304
-    sec
-    sbc.l posX
-    sta $28              ; perpDist = 2304 - posX
-    lda #2304
-    sta $20              ; x1 = segplane
-    lda #256
-    sta $22              ; y1 = mintex (di_south: mintex first)
-    lda #2304
-    sta $24              ; x2 = segplane
-    lda #2304
-    sta $26              ; y2 = maxtex
-    sep #$20
-    lda #5
-    sta $2A
-    rep #$20
-    lda #0
-    sta $2C              ; normalangle_fine = 0*FINEANGLES/4
-    jsr renderOneWall
-@SkipE:
-
-    ; --- West wall (X=256, Y 256-2304): di_north (player east, posX > 256) ---
-    lda.l posX
-    cmp #257
-    bcc @SkipW
-    lda.l posX
-    sec
-    sbc #256
-    sta $28              ; perpDist = posX - 256
-    lda #256
-    sta $20              ; x1 = segplane
-    lda #2304
-    sta $22              ; y1 = maxtex (di_north: maxtex first)
-    lda #256
-    sta $24              ; x2 = segplane
-    lda #256
-    sta $26              ; y2 = mintex
-    sep #$20
-    lda #5               ; gray for west wall
-    sta $2A
-    rep #$20
-    lda #1024
-    sta $2C              ; normalangle_fine = 2*FINEANGLES/4
-    jsr renderOneWall
-@SkipW:
-
-    ; --- South wall (Y=256, X 256-2304): di_east (player south, posY > 256) ---
-    lda.l posY
-    cmp #257
-    bcc @SkipS
-    lda.l posY
-    sec
-    sbc #256
-    sta $28              ; perpDist = posY - 256
-    lda #256
-    sta $20              ; x1 = mintex (di_east: mintex first)
-    lda #256
-    sta $22              ; y1 = segplane
-    lda #2304
-    sta $24              ; x2 = maxtex
-    lda #256
-    sta $26              ; y2 = segplane
-    sep #$20
-    lda #4               ; DARK color for south wall
-    sta $2A
-    rep #$20
-    lda #512
-    sta $2C              ; normalangle_fine = 1*FINEANGLES/4
-    jsr renderOneWall
-@SkipS:
-
-    ; --- North wall (Y=2304, X 256-2304): di_west (player north, posY < 2304) ---
-    lda.l posY
-    cmp #2304
-    bcs @SkipN
-    lda #2304
-    sec
-    sbc.l posY
-    sta $28              ; perpDist = 2304 - posY
-    lda #2304
-    sta $20              ; x1 = maxtex (di_west: maxtex first)
-    lda #2304
-    sta $22              ; y1 = segplane
-    lda #256
-    sta $24              ; x2 = mintex
-    lda #2304
-    sta $26              ; y2 = segplane
-    sep #$20
-    lda #4               ; DARK color for north wall
-    sta $2A
-    rep #$20
-    lda #1536
-    sta $2C              ; normalangle_fine = 3*FINEANGLES/4
-    jsr renderOneWall
-@SkipN:
+    ; BSP traversal from root (entry 0, byte offset 0)
+    ldx #0
+    jsr renderBSPNode
 
     plp
     rtl
@@ -1732,4 +1893,5 @@ playback_bg:
 
 .ramsection ".coldrawn" slot 2 bank 126
 colDrawn dsb 112
+colsFilled dsb 2
 .ends
