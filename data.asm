@@ -549,6 +549,44 @@ columnstart:
 .ENDR
 .UNDEFINE _CS
 
+;; -------------------------------------------------------
+;; fillTestWall -- fill column arrays from assembly
+;; Hardcoded: columns 10-99 get wall from row 20-60, color 5
+;; Bypasses C compiler entirely
+;; -------------------------------------------------------
+fillTestWall:
+    php
+    sep #$20
+    rep #$10
+
+    ; Fill columns 0-111 with default (no wall)
+    ldx #$0000
+@Init:
+    lda #40
+    sta.l colDrawStart,x
+    sta.l colDrawEnd,x
+    lda #CEIL_COLOR
+    sta.l colWallColor,x
+    inx
+    cpx #112
+    bne @Init
+
+    ; Fill columns 10-99 with wall band
+    ldx #$000A           ; start at column 10
+@Wall:
+    lda #20
+    sta.l colDrawStart,x
+    lda #60
+    sta.l colDrawEnd,x
+    lda #5               ; wall color
+    sta.l colWallColor,x
+    inx
+    cpx #100             ; stop at column 100
+    bne @Wall
+
+    plp
+    rtl
+
 dmaFramebuffer:
     jmp blitPlay
 

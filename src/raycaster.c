@@ -56,6 +56,7 @@ extern u16  readJoypad(void);
 extern void renderColumns(void);
 extern void clearFramebuffer(void);
 extern void dmaFramebuffer(void);
+extern void fillTestWall(void);
 extern void testWMADD(void);
 
 /* Player state (8.8 fixed point) */
@@ -508,15 +509,16 @@ void castAllRays(void) {
  *   5. Loop
  * ============================================ */
 int main(void) {
-    u16 i;
     initMode7Display();
     disableNMI();
     initPlayer();
 
+    fillTestWall();  /* fill column arrays from assembly */
+
     while (1) {
-        clearFramebuffer();   /* DMA ceiling/floor background */
-        renderColumns();      /* write wall bands from arrays */
-        dmaFramebuffer();     /* BlitPlay to VRAM */
+        clearFramebuffer();
+        renderColumns();
+        dmaFramebuffer();
     }
 
     return 0;
