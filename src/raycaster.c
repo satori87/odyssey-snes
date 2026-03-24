@@ -34,7 +34,7 @@ typedef signed long long s32;
 #define MAX_STEPS 24
 
 /* Movement speed in 8.8 fixed point */
-#define MOVE_SPEED 20       /* slower movement */
+#define MOVE_SPEED 20       /* movement speed */
 #define ROT_SPEED  2        /* slower rotation */
 
 /* Wall color indices */
@@ -203,14 +203,14 @@ u16 frac_mul(u16 frac, u16 val) {
  * Initialize player state
  * ============================================ */
 void initPlayer(void) {
-    /* Start at center (5.0, 5.0) facing east — see multiple walls */
-    posX = (5 << 8);           /* 5.0 in 8.8 */
-    posY = (5 << 8);           /* 5.0 in 8.8 */
+    /* Start at (2.5, 2.5) facing east — open area, away from pillar */
+    posX = (2 << 8) | 128;    /* 2.5 in 8.8 */
+    posY = (2 << 8) | 128;    /* 2.5 in 8.8 */
     playerAngle = 0;
 
     /* Direction and camera plane from angle */
     dirX = cos_table[playerAngle];
-    dirY = sin_table[playerAngle];
+    dirY = -sin_table[playerAngle];  /* negate for Y-south map */
     /* Camera plane perpendicular to dir, scaled by FOV (~0.66) */
     /* 0.66 * 256 = 169 in 8.8 */
     planeX = fp_mul(-sin_table[playerAngle], 169);
@@ -220,7 +220,7 @@ void initPlayer(void) {
 /* Update direction and plane vectors from current angle */
 void updateVectors(void) {
     dirX = cos_table[playerAngle];
-    dirY = sin_table[playerAngle];
+    dirY = -sin_table[playerAngle];  /* negate: map Y increases south, sin assumes Y up */
     planeX = fp_mul(-sin_table[playerAngle], 169);
     planeY = fp_mul(cos_table[playerAngle], 169);
 }
@@ -251,11 +251,11 @@ void handleInput(void) {
 
     /* Left/Right: rotate */
     if (pad & PAD_LEFT) {
-        playerAngle -= ROT_SPEED;
+        playerAngle += ROT_SPEED;   /* counter-clockwise = turn left */
         updateVectors();
     }
     if (pad & PAD_RIGHT) {
-        playerAngle += ROT_SPEED;
+        playerAngle -= ROT_SPEED;   /* clockwise = turn right */
         updateVectors();
     }
 

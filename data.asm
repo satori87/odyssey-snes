@@ -811,11 +811,9 @@ projectX_asm:
     nop
     nop
     lda.l $4214          ; quotient
-    ; num was negative (vx left): screenX = 56 - quotient
-    sta $46
-    lda #56
-    sec
-    sbc $46
+    ; num was negative: screenX = 56 + quotient
+    clc
+    adc #56
     rts
 
 @NumPos:
@@ -837,8 +835,9 @@ projectX_asm:
     nop
     nop
     lda.l $4214          ; quotient
-    clc
-    adc #56
+    ; num positive: screenX = 56 - quotient
+    sta $46
+    lda #56
     sec
     sbc $46
     rts
@@ -992,17 +991,26 @@ PointToAngle_asm:
     ldx $66              ; x = ay
 @DoSlope:
     ; idx = (y << 9) / x, clamped to 512
-    ; Reduce both until y < 128 to prevent overflow
-    stx $6A
-@ReduceLoop:
+    ; y in A, x in X. Need: y < 128 AND x < 256 for hardware math.
+    sta $68              ; save y
+    stx $6A              ; save x
+@ReduceBoth:
+    ; Check if y >= 128 OR x >= 256 → need to reduce both
+    lda $68
     cmp #128
-    bcc @ReduceDone
-    lsr a
-    lsr $6A              ; halve x too (unsigned)
-    bra @ReduceLoop
-@ReduceDone:
-    ldx $6A
-    beq @MaxAngle        ; x=0 → 90°
+    bcs @DoReduce
+    lda $6A
+    cmp #256
+    bcc @BothOk          ; y < 128 AND x < 256 → done
+@DoReduce:
+    lsr $68              ; halve y
+    lsr $6A              ; halve x
+    bra @ReduceBoth
+@BothOk:
+    lda $6A
+    beq @MaxAngle        ; x = 0 → 90°
+    tax                  ; X = x (< 256)
+    lda $68              ; A = y (< 128)
     ; y << 9
     asl a
     asl a
@@ -1059,7 +1067,7 @@ ScaleFromGlobalAngle_asm:
     lsr a
     lsr a
     lsr a
-    sta $7E              ; visangle_fine
+    sta $56              ; visangle_fine (NOT $7E — that's used for stop column!)
 
     ; anglea = (512 + (visangle_fine - centerangle_fine)) & 1023
     sec
@@ -1070,11 +1078,11 @@ ScaleFromGlobalAngle_asm:
     asl a                ; *2 for word index
     tax
     lda.l finesine,x
-    and #$00FF           ; sinea (1-255, fits in 8 bits)
-    sta $74              ; temp: sinea
+    and #$00FF           ; sinea (1-255)
+    sta $58              ; sinea (internal scratch — NOT $74!)
 
     ; angleb = (512 + (visangle_fine - normalangle_fine)) & 1023
-    lda $7E              ; visangle_fine
+    lda $56              ; visangle_fine
     sec
     sbc $2C              ; - normalangle_fine
     clc
@@ -1084,12 +1092,12 @@ ScaleFromGlobalAngle_asm:
     tax
     lda.l finesine,x
     and #$00FF           ; sineb
-    sta $76              ; temp: sineb
-    beq @MaxScale        ; sineb=0 → infinite depth → max scale
+    sta $5A              ; sineb (internal scratch — NOT $76!)
+    beq @MaxScale
 
     ; tz = perpDist * sinea / sineb (Noah's exact formula)
     ; Step 1: ratio = (sinea << 8) / sineb (8.8 fixed-point ratio)
-    lda $74              ; sinea (1-255)
+    lda $58              ; sinea (internal scratch)
     and #$00FF
     xba                  ; sinea << 8
     sep #$20
@@ -1097,7 +1105,7 @@ ScaleFromGlobalAngle_asm:
     sta.l $4204          ; dividend low
     xba
     sta.l $4205          ; dividend high
-    lda $76              ; sineb
+    lda $5A              ; sineb (internal scratch)
     sta.l $4206          ; trigger divide
     rep #$20
 .ACCU 16
@@ -1196,25 +1204,23 @@ renderOneWall:
     sta $4A
     lda $4C
     sec
-    sbc $50
-    inc a                ; a2 = angle2 - centershort + 1 (non-inclusive)
+    sbc $50              ; a2 = angle2 - centershort
     sta $4C
 
-    ; Clip to clipshortangle
+    ; Simple clip to [-clipshortangle, +clipshortangle]
     lda $4A
     clc
     adc #CLIPSHORTANGLE
     cmp #CLIPSHORTANGLE*2
     bcc @NoClipL
-    ; tspan > 2*clip → check if entirely off left
     sec
     sbc #CLIPSHORTANGLE*2
     cmp $4E
     bcc @ClipL
-    jmp @Done            ; entirely off left
+    jmp @Done
 @ClipL:
     lda #CLIPSHORTANGLE
-    sta $4A              ; clamp to left edge
+    sta $4A
 @NoClipL:
 
     lda #CLIPSHORTANGLE
@@ -1226,12 +1232,12 @@ renderOneWall:
     sbc #CLIPSHORTANGLE*2
     cmp $4E
     bcc @ClipR
-    jmp @Done            ; entirely off right
+    jmp @Done
 @ClipR:
     lda #$0000
     sec
     sbc #CLIPSHORTANGLE
-    sta $4C              ; clamp to right edge (-clipshortangle)
+    sta $4C
 @NoClipR:
 
     ; --- Step 4: Convert angles to screen columns via viewangletox ---
@@ -1272,7 +1278,7 @@ renderOneWall:
     jmp @Done            ; rw_stopx == rw_x → less than 1 column
 @HasCols2:
 
-    ; --- Step 5: ScaleFromGlobalAngle at both columns (Noah's method) ---
+    ; --- Step 5: ScaleFromGlobalAngle at both columns ---
     ; scale = scaleatz[ perpDist * sin(anglea) / sin(angleb) ]
     ; anglea = (512 + (vis_fine - center_fine)) & 1023
     ; angleb = (512 + (vis_fine - normal_fine)) & 1023
@@ -1504,7 +1510,7 @@ renderAllWalls:
     lda #2304
     sta $26
     sep #$20
-    lda #4
+    lda #5               ; gray for west wall
     sta $2A
     rep #$20
     lda #0
@@ -1529,7 +1535,7 @@ renderAllWalls:
     lda #256
     sta $26
     sep #$20
-    lda #5
+    lda #4               ; DARK color for south wall
     sta $2A
     rep #$20
     lda #1536
@@ -1554,7 +1560,7 @@ renderAllWalls:
     lda #2304
     sta $26
     sep #$20
-    lda #5
+    lda #4               ; DARK color for north wall
     sta $2A
     rep #$20
     lda #512
