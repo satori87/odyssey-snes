@@ -518,10 +518,14 @@ int main(void) {
 
     renderAllWalls();
 
+    /* First frame: prepare screenbuffer before loop */
+    clearFramebuffer();
+    renderColumns();
+
     while (1) {
-        clearFramebuffer();
-        renderColumns();
-        dmaFramebuffer();
+        dmaFramebuffer();   /* BlitPlay FIRST — catches VBlank early */
+        clearFramebuffer(); /* DMA clear during active display (fine for WRAM) */
+        renderColumns();    /* write walls during active display */
     }
 
     return 0;

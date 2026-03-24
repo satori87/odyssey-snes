@@ -316,17 +316,19 @@ blitPlay:
     sep #$20
     rep #$10
 
-    ; Wait for VBlank transition (ensures full VBlank time for DMA)
-@WNV:
-    lda.l $4212
-    and #$80
-    bne @WNV             ; wait for NOT VBlank (active display)
-@WV:
-    lda.l $4212
-    and #$80
-    beq @WV              ; wait for VBlank start
+    ; Noah's Ark approach: enter forced blank at scanline 208
+    ; (bottom border = tile 0 = black, invisible blanking)
+    ; Gives 16 extra scanlines before VBlank for DMA
+@WScan:
+    lda.l $2137          ; latch H/V counters
+    lda.l $213D          ; V counter low byte (1st read)
+    sta $10              ; save scanline
+    lda.l $213D          ; V counter high (2nd read, resets flip-flop)
+    lda $10
+    cmp #208             ; bottom border starts at scanline ~208
+    bcc @WScan           ; loop until scanline >= 208
 
-    ; Forced blank
+    ; Forced blank (bottom border is already black = invisible)
     lda #$80
     sta.l $2100
 
