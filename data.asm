@@ -1010,27 +1010,9 @@ renderAllWalls:
     bne @Init2
     rep #$20
 
-    ; === Hardcoded east wall: perpDist=384, all columns ===
-    ; scaleatz[384] = 7645, wallHeight = 29, halfH = 14
-    ; drawStart = 26, drawEnd = 54
-    sep #$20
-.ACCU 8
-    ldx #$0000
-@HardWall:
-    lda #26
-    sta.l colDrawStart,x
-    lda #54
-    sta.l colDrawEnd,x
-    lda #5
-    sta.l colWallColor,x
-    inx
-    cpx #112
-    bne @HardWall
-    rep #$20
+    ; === Project east wall (X=2304) ===
 .ACCU 16
-    jmp @SkipPN
-
-    ; === (disabled) Project east wall ===
+.INDEX 16
     lda #2304
     sec
     sbc.l posX
@@ -1055,6 +1037,8 @@ renderAllWalls:
     sta $3A
     jsr projectX_asm
     sta $4C              ; sx2
+
+    ; Both projections returned — continue to sort/clamp/fill
 
     ; Sort & clamp
     lda $4A
@@ -1136,7 +1120,7 @@ renderAllWalls:
     sta.l colDrawStart,x
     lda $51
     sta.l colDrawEnd,x
-    lda #18              ; wall color = YELLOW (same as HUD, definitely visible)
+    lda #5               ; gray wall
     sta.l colWallColor,x
 @Fskp:
     inx
@@ -1146,7 +1130,21 @@ renderAllWalls:
     sep #$20
     bcc @Fcol
 
+    ; DEBUG: force column 56 as proof code reached here
+    sep #$20
+.ACCU 8
+    ldx #$0038
+    lda #10
+    sta.l colDrawStart,x
+    lda #70
+    sta.l colDrawEnd,x
+    lda #5
+    sta.l colWallColor,x
+    lda #$01
+    sta.l colDrawn,x
+
     rep #$20
+.ACCU 16
     jmp @SkipPN
 
     ; === East outer wall at col=9 (X=2304): visible when posX < 2304 ===
