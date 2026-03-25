@@ -36,7 +36,7 @@ def main():
 
     outer = walls_img.crop((0, 0, 32, 32))
     inner = walls_img.crop((192, 64, 224, 96))
-    floor = floors_img.crop((0, 224, 32, 256))
+    floor = floors_img.crop((32, 224, 64, 256))
 
     freq = Counter()
     for img in [outer, inner, floor]:

@@ -34,8 +34,8 @@ typedef signed long long s32;
 #define MAX_STEPS 24
 
 /* Movement speed in 8.8 fixed point */
-#define MOVE_SPEED 40       /* movement speed */
-#define ROT_SPEED  4        /* rotation speed */
+#define MOVE_SPEED 60       /* movement speed */
+#define ROT_SPEED  6        /* rotation speed */
 
 /* Wall color indices */
 #define WALL_BRIGHT 5
@@ -57,10 +57,9 @@ extern void renderColumns(void);
 extern void clearFramebuffer(void);
 extern void dmaFramebuffer(void);
 extern void fillTestWall(void);
+extern void renderFloorCPU(void);
 extern void startSA1Floor(void);
-extern void waitSA1Floor(void);
 extern void copyFloorFromBWRAM(void);
-extern void testFillBWRAM(void);
 extern void initColumnArrays(void);
 extern void renderOneWall(void);
 extern void renderAllWalls(void);
@@ -527,12 +526,10 @@ int main(void) {
     while (1) {
         dmaFramebuffer();   /* BlitPlay FIRST */
         handleInput();      /* d-pad movement + rotation */
-        renderAllWalls();   /* re-project walls from new position */
-        renderAllWalls();   /* re-project walls from new position */
-        clearFramebuffer(); /* DMA clear */
-        renderColumns();    /* write walls */
-        copyFloorFromBWRAM();
-        startSA1Floor();    /* trigger SA-1 for next frame (no wait) */
+        renderAllWalls();   /* fills column arrays */
+        clearFramebuffer(); /* solid ceiling + floor */
+        renderFloorCPU();   /* main CPU floor texture */
+        renderColumns();    /* walls drawn LAST — overwrite floor */
     }
 
     return 0;

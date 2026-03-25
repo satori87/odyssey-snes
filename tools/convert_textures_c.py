@@ -198,7 +198,7 @@ def main():
     # Floor: floors.png tile (0,7)
     outer_wall_tile = extract_tile(walls_img, col=0, row=0)
     inner_wall_tile = extract_tile(walls_img, col=6, row=2)
-    floor_tile = extract_tile(floors_img, col=0, row=7)
+    floor_tile = extract_tile(floors_img, col=1, row=7)
 
     print(f"Outer wall: tile 1, col=0, row=0 from walls.png")
     print(f"Inner wall: tile 23, col=6, row=2 from walls.png")
@@ -260,10 +260,10 @@ def main():
     dark_c += "    " + ", ".join(f"0x{v:04X}" for v in dark_bgr) + "\n};"
 
     palette_text = (pal_header + "\n/* Colors 0-15: texture palette */\n" + pal_c +
-                    "\n/* Colors 16-17: ceiling and floor solid (legacy) */\n"
+                    "\n/* Colors 16-17: ceiling and floor solid */\n"
                     "const u16 extra_palette[2] = {\n"
-                    "    0x7C00,  /* 16: blue (ceiling) */\n"
-                    "    0x02A0   /* 17: dark green (floor) */\n"
+                    "    0x1084,  /* 16: dark gray ceiling (#222222) */\n"
+                    "    0x1CE7   /* 17: medium gray floor (#383838) */\n"
                     "};\n\n" + dark_c + "\n\n#endif /* PALETTES_H */\n")
 
     with open(PALETTES_PATH, "w", newline="\n") as f:

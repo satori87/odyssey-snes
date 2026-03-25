@@ -2223,202 +2223,199 @@ IRQTrampoline:
 .define BWRAM_FLOOR  $6100
 
 ;; -------------------------------------------------------
-;; sa1_renderFloor -- floor raycasting on SA-1 (called via JSL from bank 0)
-;; Reads player state from I-RAM, colDrawEnd from I-RAM
-;; Writes floor pixels to BW-RAM ($6000) row-major
-;; Uses SA-1 hardware multiply ($2250-$2254, result at $2306-$2309)
 ;; -------------------------------------------------------
-sa1_renderFloor:
+;; renderFloorCPU -- main CPU floor raycasting (row-major, Lodev style)
+;; For each row: precompute floorX/Y, step across columns.
+;; Walls draw AFTER this, so floor covers entire bottom half.
+;; -------------------------------------------------------
+renderFloorCPU:
+    php
+    rep #$30
 .ACCU 16
 .INDEX 16
+
+    ; WMBANK = $7F
+    sep #$20
+    lda #$7F
+    sta.l $2183
+    rep #$20
+
     ; Precompute ray directions
-    ; leftRayDirX = dirX - planeX
-    lda BWRAM_DIRX
+    lda.l dirX
     sec
-    sbc BWRAM_PLANEX
-    sta $80              ; leftRayDirX (I-RAM scratch at $3080)
-    lda BWRAM_DIRY
+    sbc.l planeX
+    sta $80              ; leftRayDirX
+    lda.l dirY
     sec
-    sbc BWRAM_PLANEY
+    sbc.l planeY
     sta $82              ; leftRayDirY
-    ; 2*planeX, 2*planeY
-    lda BWRAM_PLANEX
+    lda.l planeX
     asl a
     sta $84              ; 2*planeX
-    lda BWRAM_PLANEY
+    lda.l planeY
     asl a
     sta $86              ; 2*planeY
 
-    ; Row loop: r = 0..38 (screen rows 41..79)
+    ; Row-major: for each row, step floorX/Y across columns
     lda #$0000
-    sta $8A              ; row index
-    lda #$6100
-    sta $88              ; BW-RAM floor pixel buffer pointer
+    sta $40              ; row index
 
-@SA1RowLoop:
+@FRRow:
     ; rowDist = rowDist_table[row]
-    lda $8A
+    lda $40
     asl a
     tax
     lda.l rowDist_table,x
     sta $8C              ; rowDist
 
-    ; SA-1 signed multiply: set mode
-    sep #$20
-    lda #$01             ; signed multiply
-    sta $2250
-    rep #$20
-
-    ; floorX = posX + fp_mul(rowDist, leftRayDirX)
+    ; floorX_start = posX + fp_mul(rowDist, leftRayDirX)
     lda $8C
-    sta $2251            ; MA = rowDist
+    tay
     lda $80
-    sta $2253            ; MB = leftRayDirX
-    nop                  ; SA-1 multiply is near-instant but 1 cycle delay
-    lda $2307            ; result bits 8-23 = >>8 of 32-bit product
+    jsr fp_mul_hw
     clc
-    adc BWRAM_POSX
-    sta $90              ; floorX
+    adc.l posX
+    sta $90              ; floorX (will be stepped)
 
-    ; floorY = posY + fp_mul(rowDist, leftRayDirY)
+    ; floorY_start = posY + fp_mul(rowDist, leftRayDirY)
     lda $8C
-    sta $2251
+    tay
     lda $82
-    sta $2253
-    nop
-    lda $2307
+    jsr fp_mul_hw
     clc
-    adc BWRAM_POSY
-    sta $92              ; floorY
+    adc.l posY
+    sta $92              ; floorY (will be stepped)
 
     ; floorStepX = fp_mul(rowDist, 2*planeX) / 112
     lda $8C
-    sta $2251
+    tay
     lda $84
-    sta $2253
-    nop
-    lda $2307            ; rowDist * 2*planeX
+    jsr fp_mul_hw
     sta $94
-    ; Divide by 112: use SA-1 divider
-    ; $2250 bit1=1 for divide mode
-    sep #$20
-    lda #$02             ; unsigned divide (we'll handle sign manually)
-    sta $2250
-    rep #$20
-    lda $94
-    bpl @StXPos
+    bpl @SXPos
     eor #$FFFF
     inc a
-    sta $2251            ; dividend low word (unsigned abs)
-    lda #$0000
-    sta $2253            ; dividend high word
+    sep #$20
+.ACCU 8
+    sta.l $4204
+    xba
+    sta.l $4205
     lda #112
-    sta $2258            ; divisor
+    sta.l $4206
+    rep #$20
+.ACCU 16
     nop
     nop
     nop
     nop
-    nop                  ; SA-1 divide takes 5 cycles
-    lda $2306            ; quotient
+    nop
+    nop
+    nop
+    nop
+    lda.l $4214
     eor #$FFFF
-    inc a                ; re-negate
-    sta $94              ; floorStepX (negative)
-    bra @StXDone
-@StXPos:
-    sta $2251
-    lda #$0000
-    sta $2253
+    inc a
+    sta $94
+    bra @SXDone
+@SXPos:
+    sep #$20
+.ACCU 8
+    sta.l $4204
+    xba
+    sta.l $4205
     lda #112
-    sta $2258
+    sta.l $4206
+    rep #$20
+.ACCU 16
     nop
     nop
     nop
     nop
     nop
-    lda $2306
-    sta $94              ; floorStepX
-@StXDone:
+    nop
+    nop
+    nop
+    lda.l $4214
+    sta $94
+@SXDone:
 
     ; floorStepY = fp_mul(rowDist, 2*planeY) / 112
-    sep #$20
-    lda #$01             ; signed multiply
-    sta $2250
-    rep #$20
     lda $8C
-    sta $2251
+    tay
     lda $86
-    sta $2253
-    nop
-    lda $2307
+    jsr fp_mul_hw
     sta $96
+    bpl @SYPos
+    eor #$FFFF
+    inc a
     sep #$20
-    lda #$02             ; unsigned divide
-    sta $2250
+.ACCU 8
+    sta.l $4204
+    xba
+    sta.l $4205
+    lda #112
+    sta.l $4206
     rep #$20
-    lda $96
-    bpl @StYPos
+.ACCU 16
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    lda.l $4214
     eor #$FFFF
     inc a
-    sta $2251
-    lda #$0000
-    sta $2253
+    sta $96
+    bra @SYDone
+@SYPos:
+    sep #$20
+.ACCU 8
+    sta.l $4204
+    xba
+    sta.l $4205
     lda #112
-    sta $2258
+    sta.l $4206
+    rep #$20
+.ACCU 16
     nop
     nop
     nop
     nop
     nop
-    lda $2306
-    eor #$FFFF
-    inc a
-    sta $96              ; floorStepY (negative)
-    bra @StYDone
-@StYPos:
-    sta $2251
-    lda #$0000
-    sta $2253
-    lda #112
-    sta $2258
     nop
     nop
     nop
-    nop
-    nop
-    lda $2306
-    sta $96              ; floorStepY
-@StYDone:
+    lda.l $4214
+    sta $96
+@SYDone:
 
-    ; Column loop: 112 columns
-    lda $8A
+    ; screenRow = 41 + row
+    lda $40
     clc
     adc #41
-    sta $98              ; screenRow
+    sta $42
+
+    ; Column loop: step floorX/Y across 112 columns
     lda #$0000
-    sta $9A              ; column index
+    sta $44              ; col index
 
-@SA1ColLoop:
-    ; Check if floor pixel visible (screenRow >= colDrawEnd[col])
-    ldx $9A
-    sep #$20
-    lda $98              ; screenRow
-    cmp BWRAM_COLEND,x    ; colDrawEnd[col]
-    rep #$20
-    bcc @SA1SkipPix      ; wall covers this pixel
-
-    ; Compute texture coords
-    lda $90              ; floorX
+@FRCol:
+    ; texU = (floorX >> 3) & 31, texV = (floorY >> 3) & 31
+    lda $90
     lsr a
     lsr a
     lsr a
     and #$001F
-    sta $9C              ; texU
-    lda $92              ; floorY
+    sta $9C
+    lda $92
     lsr a
     lsr a
     lsr a
     and #$001F
-    sta $9E              ; texV
+    sta $9E
     ; texAddr = texU * 32 + texV
     lda $9C
     asl a
@@ -2429,54 +2426,61 @@ sa1_renderFloor:
     clc
     adc $9E
     tax
+
+    ; Set WMADD = columnstart[col] + screenRow
+    stx $46              ; save tex index
+    rep #$20
+.ACCU 16
+    lda $44
+    and #$00FF
+    asl a
+    tax
+    lda.l columnstart,x
+    sta $48
     sep #$20
+.ACCU 8
+    lda $48
+    clc
+    adc $42
+    sta.l $2181
+    lda $49
+    adc #$00
+    sta.l $2182
+
+    ; Write floor pixel
+    ldx $46
     lda.l floor_tex,x
-    ; Write to BW-RAM
-    ldx $88              ; BW-RAM pointer
-    sta BWRAM_FLOOR,x
+    sta.l $2180
     rep #$20
-    bra @SA1NextCol
+.ACCU 16
 
-@SA1SkipPix:
-    ; Write 0 (marker: wall covers this pixel)
-    ldx $88
-    sep #$20
-    lda #$00
-    sta BWRAM_FLOOR,x
-    rep #$20
-
-@SA1NextCol:
-    ; Advance BW-RAM pointer
-    lda $88
-    inc a
-    sta $88
-    ; Advance floor position
+    ; Step floor position
     lda $90
     clc
-    adc $94              ; floorX += floorStepX
+    adc $94              ; floorX += stepX
     sta $90
     lda $92
     clc
-    adc $96              ; floorY += floorStepY
+    adc $96              ; floorY += stepY
     sta $92
+
     ; Next column
-    lda $9A
+    lda $44
     inc a
-    sta $9A
+    sta $44
     cmp #112
-    bcc @SA1ColLoop
+    bcc @FRCol
 
     ; Next row
-    lda $8A
+    lda $40
     inc a
-    sta $8A
+    sta $40
     cmp #39
-    bcs @SA1RowsDone
-    jmp @SA1RowLoop
-@SA1RowsDone:
-    rtl                  ; return to sa1_wait in bank 0 (called via JSL)
-
-;; -------------------------------------------------------
+    bcs @FRDone
+    jmp @FRRow
+@FRDone:
+    plp
+    rtl
 ;; startSA1Floor -- copy player state to I-RAM, trigger SA-1
 ;; -------------------------------------------------------
 startSA1Floor:
@@ -2507,9 +2511,15 @@ startSA1Floor:
     inx
     cpx #112
     bne @CpEnd
-    ; Trigger SA-1 via BW-RAM command byte
-    lda #$01
-    sta.l $400000        ; BW-RAM command = 1 (render floor)
+    ; Write test pattern to floor buffer to verify copy reads correctly
+    ; Main CPU writes color 7 to first 112 bytes of floor buffer
+    ldx #$0000
+@TestWrite:
+    lda #7
+    sta.l $400100,x      ; BW-RAM offset $0100 = SA-1 $6100
+    inx
+    cpx #112
+    bne @TestWrite
     plp
     rtl
 
@@ -2569,44 +2579,55 @@ copyFloorFromBWRAM:
 .ACCU 8
 .INDEX 16
 
+    ; DEBUG: write pixel to top-left of screenbuffer to prove this runs
+    lda #$7F
+    sta.l $2183          ; WMBANK
+    lda #$00
+    sta.l $2181          ; WMADD low = $00
+    lda #$20
+    sta.l $2182          ; WMADD mid = $20 → address $2000
+    lda #15              ; bright color
+    sta.l $2180          ; row 0 (debug pixel) — WMADD auto-increments
+    lda #12
+    sta.l $2180          ; row 1 (auto-inc, no address reset)
+    sta.l $2180          ; row 2
+    sta.l $2180          ; row 3
+    sta.l $2180          ; row 4
+    sta.l $2180          ; row 5
+    sta.l $2180          ; row 6
+    sta.l $2180          ; row 7
+    sta.l $2180          ; row 8
+    sta.l $2180          ; row 9
+    sta.l $2180          ; row 10
+    sta.l $2180          ; row 11
+    sta.l $2180          ; row 12
+    sta.l $2180          ; row 13
+    sta.l $2180          ; row 14
+    sta.l $2180          ; row 15
+    sta.l $2180          ; row 16
+    sta.l $2180          ; row 17
+    sta.l $2180          ; row 18
+    sta.l $2180          ; row 19
+
     ; WMBANK = $7F
     lda #$7F
     sta.l $2183
 
-    ; 24-bit pointer to BW-RAM floor buffer ($40:0100)
+    ; 24-bit pointer to BW-RAM floor buffer ($40:0100 = SA-1 $6100)
     lda #$00
-    sta $50
+    sta $50              ; low
     lda #$01
-    sta $51
+    sta $51              ; mid → address $0100
     lda #$40
-    sta $52
+    sta $52              ; bank $40
 
-    ; Column-major copy: set WMADD once per column, auto-increment down
+    ; Column-major copy: WMADD set once per column, auto-increments
+    ; Walls draw AFTER this, so write all 39 floor rows unconditionally
     ldx #$0000           ; column index
 
 @CFCol:
-    ; Floor starts at max(41, colDrawEnd[col])
-    lda.l colDrawEnd,x
-    cmp #80
-    bcc @CFNotFull
-    jmp @CFNext          ; wall fills column
-@CFNotFull:
-    cmp #41
-    bcs @CFOk
-    lda #41
-@CFOk:
-    sta $42              ; floorStart (screen row)
-    ; pixelCount = 80 - floorStart
-    lda #80
-    sec
-    sbc $42
-    bne @CFHasPix
-    jmp @CFNext
-@CFHasPix:
-    sta $43              ; pixel count
-
-    ; Set WMADD = columnstart[col] + floorStart (auto-increments after)
-    stx $44              ; save col index
+    ; Set WMADD = columnstart[col] + 41 (floor starts at screen row 41)
+    stx $44              ; save col
     rep #$20
 .ACCU 16
     txa
@@ -2614,95 +2635,52 @@ copyFloorFromBWRAM:
     asl a
     tax
     lda.l columnstart,x
-    sta $48
     sep #$20
 .ACCU 8
-    lda $48
     clc
-    adc $42
+    adc #41              ; + screen row 41
     sta.l $2181
-    lda $49
+    rep #$20
+.ACCU 16
+    lda.l columnstart,x
+    sep #$20
+.ACCU 8
+    xba
     adc #$00
     sta.l $2182
 
-    ; Compute starting BW-RAM Y = (floorStart - 41) * 112 + col
+    ; Y = BW-RAM start offset = col (row 0, column col)
     rep #$20
 .ACCU 16
-    lda $42
-    and #$00FF
-    sec
-    sbc #41              ; rows to skip
-    sta $46
-    ; Multiply by 112: n*112 = n*128 - n*16 = (n<<7) - (n<<4)
-    asl a
-    asl a
-    asl a
-    asl a                ; n*16
-    sta $48
-    lda $46
-    xba                  ; n*256... too much. Use: n*64 + n*32 + n*16
-    lda $46
-    asl a
-    asl a
-    asl a
-    asl a                ; n*16
-    sta $48
-    asl a                ; n*32
-    sta $4A
-    asl a                ; n*64
-    clc
-    adc $4A              ; n*96
-    clc
-    adc $48              ; n*112
-    clc
-    adc $44              ; + col
-    and #$00FF
-    ora $46              ; ... this is getting messy, let me use a simpler multiply
-    ; Simple: just add 112 in a loop
     lda $44
-    and #$00FF           ; Y = col
-    tay
-    lda $42
     and #$00FF
-    sec
-    sbc #41
-    beq @CFNoSkip
-    tax
-@CFSkip:
-    tya
-    clc
-    adc #112
     tay
-    dex
-    bne @CFSkip
-@CFNoSkip:
     sep #$20
 .ACCU 8
 
-    ; Y = BW-RAM offset for first floor pixel
-    ; Write pixelCount pixels, WMADD auto-increments
+    ; Write 39 floor pixels, advancing Y by 112 each time
+    lda #39
+    sta $40              ; pixel count
 @CFPix:
-    lda [$50],y          ; read BW-RAM floor pixel
-    sta.l $2180          ; write to screenbuffer (WMADD auto-increments!)
-    ; Advance Y by 112 for next row in row-major BW-RAM
+    ;lda [$50],y          ; DISABLED: read BW-RAM floor pixel
+    lda #1               ; HARDCODED TEST: color 1
+    sta.l $2180          ; WMADD auto-increments!
     rep #$20
 .ACCU 16
     tya
     clc
-    adc #112
+    adc #112             ; next row in row-major BW-RAM
     tay
     sep #$20
 .ACCU 8
-    dec $43
+    dec $40
     bne @CFPix
 
-    ldx $44              ; restore col index
-@CFNext:
+    ldx $44              ; restore col
     inx
     cpx #112
-    beq @CFDone
-    jmp @CFCol
-@CFDone:
+    bne @CFCol
+
     plp
     rtl
 
