@@ -352,14 +352,14 @@ sa1_loop:
     lsr a
     and #$001F
     sta $9E
-    lda $9C
+    lda $9E
     asl a
     asl a
     asl a
     asl a
     asl a
     clc
-    adc $9E
+    adc $9C
     tax
     sep #$20
 .ACCU 8

@@ -198,7 +198,7 @@ def main():
     # Floor: floors.png tile (0,7)
     outer_wall_tile = extract_tile(walls_img, col=0, row=0)
     inner_wall_tile = extract_tile(walls_img, col=6, row=2)
-    floor_tile = extract_tile(floors_img, col=1, row=7)
+    floor_tile = extract_tile(floors_img, col=3, row=7)
 
     print(f"Outer wall: tile 1, col=0, row=0 from walls.png")
     print(f"Inner wall: tile 23, col=6, row=2 from walls.png")
@@ -209,35 +209,43 @@ def main():
     inner_pixels = get_pixels_rgba(inner_wall_tile)
     floor_pixels = get_pixels_rgba(floor_tile)
 
-    # Build shared palette from all 3 textures
-    all_pixel_sets = [outer_pixels, inner_pixels, floor_pixels]
-    freq = Counter()
-    for pixels in all_pixel_sets:
+    # === Three separate palettes ===
+    def build_pal(pixels):
+        f = Counter()
         for r, g, b, a in pixels:
             if a > 0:
-                freq[(r, g, b)] += 1
-    freq.pop((0, 0, 0), None)
-    remaining_slots = 15  # slot 0 = black
-    unique_colors = list(freq.keys())
-    if len(unique_colors) <= remaining_slots:
-        selected = sorted(unique_colors, key=lambda c: -freq[c])
-    else:
-        selected = [c for c, _ in freq.most_common(remaining_slots)]
-    palette = [(0, 0, 0)] + selected
-    while len(palette) < 16:
-        palette.append((0, 0, 0))
+                f[(r, g, b)] += 1
+        f.pop((0, 0, 0), None)
+        colors = [c for c, _ in f.most_common(15)]
+        pal = [(0, 0, 0)] + colors
+        while len(pal) < 16:
+            pal.append((0, 0, 0))
+        return pal, len(f)
 
-    print(f"Unique colors across all textures: {len(unique_colors)}")
-    print(f"Palette slots used: {min(len(unique_colors) + 1, 16)}")
+    # Outer wall palette (CGRAM 0-15, dark at 32-47)
+    outer_palette, outer_uniq = build_pal(outer_pixels)
+    # Inner wall palette (CGRAM 16-31, dark at 48-63)
+    inner_palette, inner_uniq = build_pal(inner_pixels)
+    # Floor palette (CGRAM 64-79, dark at 96-111)
+    floor_palette, floor_uniq = build_pal(floor_pixels)
+    # Keep 'palette' pointing to outer for format_palette_c compatibility
+    palette = outer_palette
 
-    # Index pixels to palette (column-major)
-    outer_indices = index_tile(outer_pixels, TILE_SIZE, TILE_SIZE, palette)
-    inner_indices = index_tile(inner_pixels, TILE_SIZE, TILE_SIZE, palette)
-    floor_indices = index_tile(floor_pixels, TILE_SIZE, TILE_SIZE, palette)
+    print(f"Outer wall palette: {outer_uniq} unique -> 15 slots (CGRAM 0-15)")
+    print(f"Inner wall palette: {inner_uniq} unique -> 15 slots (CGRAM 16-31)")
+    print(f"Floor palette: {floor_uniq} unique -> 15 slots (CGRAM 64-79)")
 
-    # Ceiling = darkened floor (indices + 32, using darkened palette at slots 32-47)
-    ceil_indices = darken_indices(floor_indices, palette)
-    dark_palette = darken_palette(palette)
+    # Index each texture to its own palette with correct offset
+    outer_indices = index_tile(outer_pixels, TILE_SIZE, TILE_SIZE, outer_palette)
+    # Inner wall: offset by 16 (CGRAM 16-31)
+    inner_indices = index_tile(inner_pixels, TILE_SIZE, TILE_SIZE, inner_palette)
+    inner_indices = [0 if v == 0 else v + 16 for v in inner_indices]
+    # Floor: offset by 64 (CGRAM 64-79)
+    floor_indices = index_tile(floor_pixels, TILE_SIZE, TILE_SIZE, floor_palette)
+    floor_indices = [0 if v == 0 else v + 64 for v in floor_indices]
+
+    # Ceiling = floor + 32 (CGRAM 96-111)
+    ceil_indices = [0 if v == 0 else v + 32 for v in floor_indices]
 
     # Generate output files
     os.makedirs(DATA_DIR, exist_ok=True)
@@ -252,19 +260,29 @@ def main():
         "#ifndef PALETTES_H\n"
         "#define PALETTES_H\n"
     )
-    pal_c = format_palette_c(palette)
-    # Also generate darkened palette for ceiling
-    dark_bgr = [rgb_to_bgr555(r, g, b) for r, g, b in dark_palette]
-    dark_c = f"/* Colors 32-47: darkened texture palette (for ceiling) */\n"
-    dark_c += f"const u16 dark_palette[{len(dark_bgr)}] = {{\n"
-    dark_c += "    " + ", ".join(f"0x{v:04X}" for v in dark_bgr) + "\n};"
+    def pal_to_c(name, pal):
+        bgr = [rgb_to_bgr555(r, g, b) for r, g, b in pal]
+        return f"const u16 {name}[{len(bgr)}] = {{\n    " + ", ".join(f"0x{v:04X}" for v in bgr) + "\n};"
 
-    palette_text = (pal_header + "\n/* Colors 0-15: texture palette */\n" + pal_c +
-                    "\n/* Colors 16-17: ceiling and floor solid */\n"
-                    "const u16 extra_palette[2] = {\n"
-                    "    0x1084,  /* 16: dark gray ceiling (#222222) */\n"
-                    "    0x1CE7   /* 17: medium gray floor (#383838) */\n"
-                    "};\n\n" + dark_c + "\n\n#endif /* PALETTES_H */\n")
+    palette_text = (pal_header +
+        "\n/* CGRAM 0-15: outer wall palette */\n" +
+        pal_to_c("shared_palette", outer_palette) +
+        "\n/* CGRAM 16-31: inner wall palette */\n" +
+        pal_to_c("inner_pal", inner_palette) +
+        "\n/* CGRAM 32-47: outer wall dark */\n" +
+        pal_to_c("dark_palette", darken_palette(outer_palette)) +
+        "\n/* CGRAM 48-63: inner wall dark */\n" +
+        pal_to_c("inner_dark_pal", darken_palette(inner_palette)) +
+        "\n/* CGRAM 64-79: floor palette */\n" +
+        pal_to_c("floor_pal", floor_palette) +
+        "\n/* CGRAM 96-111: floor dark (ceiling) */\n" +
+        pal_to_c("dark_floor_pal", darken_palette(floor_palette)) +
+        "\n/* Colors for solid ceiling/floor fill */\n"
+        "const u16 extra_palette[2] = {\n"
+        "    0x1084,  /* dark gray ceiling */\n"
+        "    0x1CE7   /* medium gray floor */\n"
+        "};\n"
+        "\n#endif /* PALETTES_H */\n")
 
     with open(PALETTES_PATH, "w", newline="\n") as f:
         f.write(palette_text)
@@ -306,6 +324,19 @@ def main():
 
     with open(GSU_TEX_PATH, "w", newline="\n") as f:
         f.write(asm_output)
+
+    # --- wall_textures.asm (included by data.asm) ---
+    WALL_TEX_PATH = os.path.join(DATA_DIR, "wall_textures.asm")
+    wall_asm = format_texture_asm("outer_wall_tex", outer_indices)
+    wall_asm += "\n\n" + format_texture_asm("inner_wall_tex", inner_indices)
+    with open(WALL_TEX_PATH, "w", newline="\n") as f:
+        f.write(wall_asm + "\n")
+
+    # --- floor_texture.asm (included by data.asm) ---
+    FLOOR_TEX_PATH = os.path.join(DATA_DIR, "floor_texture.asm")
+    floor_asm = format_texture_asm("floor_tex", floor_indices)
+    with open(FLOOR_TEX_PATH, "w", newline="\n") as f:
+        f.write(floor_asm + "\n")
 
     print()
     print(f"Generated: {os.path.normpath(PALETTES_PATH)}")

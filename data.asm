@@ -78,15 +78,6 @@ initMode7Display:
     inx
     cpx #$0020
     bne @Pal
-    lda #16
-    sta.l $2121
-    ldx #$0000
-@ExPal:
-    lda.l extra_palette,x
-    sta.l $2122
-    inx
-    cpx #$0004
-    bne @ExPal
     ; Load yellow at palette entry 18 (for HUD text)
     lda #18
     sta.l $2121
@@ -94,7 +85,17 @@ initMode7Display:
     sta.l $2122
     lda #$03
     sta.l $2122
-    ; Load dark palette at entries 32-47 (for N/S wall darkening)
+    ; CGRAM 16-31: inner wall palette
+    lda #16
+    sta.l $2121
+    ldx #$0000
+@InPal:
+    lda.l inner_pal,x
+    sta.l $2122
+    inx
+    cpx #$0020
+    bne @InPal
+    ; CGRAM 32-47: outer wall dark
     lda #32
     sta.l $2121
     ldx #$0000
@@ -102,8 +103,38 @@ initMode7Display:
     lda.l dark_palette,x
     sta.l $2122
     inx
-    cpx #$0020           ; 16 colors × 2 bytes
+    cpx #$0020
     bne @DkPal
+    ; CGRAM 48-63: inner wall dark
+    lda #48
+    sta.l $2121
+    ldx #$0000
+@InDkPal:
+    lda.l inner_dark_pal,x
+    sta.l $2122
+    inx
+    cpx #$0020
+    bne @InDkPal
+    ; CGRAM 64-79: floor palette
+    lda #64
+    sta.l $2121
+    ldx #$0000
+@FlPal:
+    lda.l floor_pal,x
+    sta.l $2122
+    inx
+    cpx #$0020
+    bne @FlPal
+    ; CGRAM 96-111: floor dark (ceiling)
+    lda #96
+    sta.l $2121
+    ldx #$0000
+@DkFlPal:
+    lda.l dark_floor_pal,x
+    sta.l $2122
+    inx
+    cpx #$0020
+    bne @DkFlPal
 
     ; ============================================
     ; CLEAR VRAM (all words to 0)
