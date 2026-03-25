@@ -2501,22 +2501,9 @@ startSA1Floor:
     sta.l $40000A
     lda.l planeY
     sta.l $40000C
-    ; DIAGNOSTIC: Read I-RAM $3700 (SA-1 wrote $05 there)
-    ; Fill floor buffer with whatever value is at I-RAM
-    ; If SA-1 is executing: floor = color 5
-    ; If SA-1 is NOT executing: floor = color 0 (or whatever default)
+    ; Set command = 1 (render floor)
     sep #$20
 .ACCU 8
-    rep #$10
-.INDEX 16
-    lda.l $003700        ; read I-RAM byte $700 (SA-1 address $0700)
-    ldx #$0000
-@DiagIRAM:
-    sta.l $400100,x      ; fill floor buffer with I-RAM value
-    inx
-    cpx #4368
-    bne @DiagIRAM
-
     lda #$01
     sta.l $400000        ; command byte
     plp

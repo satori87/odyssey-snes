@@ -178,9 +178,13 @@ tcc__start:
     sta $2206            ; NMI vector high
     sta $2208            ; IRQ vector high
 
-    ; Step 6: Release SA-1 (bit 5 = 0 = RUN)
+    ; Step 6: Initialize BW-RAM command/status bytes
     lda #$00
-    sta $2200            ; CCNT: SA-1 starts executing at sa1_entry
+    sta.l $400000        ; command = 0 (idle)
+    sta.l $400001        ; status = 0
+
+    ; Step 7: Release SA-1 (bit 5 = 0 = RUN)
+    sta $2200            ; CCNT = $00: SA-1 starts executing at sa1_entry
     nop
     nop
     nop
@@ -272,19 +276,123 @@ sa1_entry:
     tcs                  ; SA-1 stack in I-RAM
     sep #$20
 
-    ; Continuous fill — test BW-RAM writes
+    ; Continuous floor rendering — no command/status handshake
+    ; SA-1 reads player state directly from BW-RAM, renders continuously
 sa1_loop:
-    rep #$10
+    rep #$30
+.ACCU 16
 .INDEX 16
+
+    ; Precompute ray directions from BW-RAM player state
+    lda $6006            ; dirX
+    sec
+    sbc $600A            ; - planeX
+    sta $80              ; leftRayDirX
+    lda $6008            ; dirY
+    sec
+    sbc $600C            ; - planeY
+    sta $82              ; leftRayDirY
+    lda $600A            ; planeX
+    asl a
+    sta $84              ; 2*planeX
+    lda $600C            ; planeY
+    asl a
+    sta $86              ; 2*planeY
+
+    lda #$0000
+    sta $40              ; row index
+    sta $88              ; BW-RAM output offset
+
+@Row:
+    lda $40
+    asl a
+    tax
+    lda $7C00,x
+    sta $8C              ; rowDist
+
+    ; floorX = posX + sa1_mul(rowDist, leftRayDirX)
+    lda $80
+    jsr sa1_mul_8c
+    clc
+    adc $6002            ; + posX
+    sta $90
+
+    ; floorY = posY + sa1_mul(rowDist, leftRayDirY)
+    lda $82
+    jsr sa1_mul_8c
+    clc
+    adc $6004            ; + posY
+    sta $92
+
+    ; floorStepX = sa1_mul(rowDist, 2*planeX) / 112
+    lda $84
+    jsr sa1_mul_8c
+    jsr sa1_div_112
+    sta $94
+
+    ; floorStepY = sa1_mul(rowDist, 2*planeY) / 112
+    lda $86
+    jsr sa1_mul_8c
+    jsr sa1_div_112
+    sta $96
+
+    lda #$0000
+    sta $44
+
+@Col:
+    lda $90
+    lsr a
+    lsr a
+    lsr a
+    and #$001F
+    sta $9C
+    lda $92
+    lsr a
+    lsr a
+    lsr a
+    and #$001F
+    sta $9E
+    lda $9C
+    asl a
+    asl a
+    asl a
+    asl a
+    asl a
+    clc
+    adc $9E
+    tax
     sep #$20
 .ACCU 8
-    ldx #$0000
-@fill:
-    lda #4               ; color 4
-    sta $6100,x          ; BW-RAM floor buffer
-    inx
-    cpx #4368            ; 39 * 112
-    bne @fill
+    lda $7800,x
+    ldx $88
+    sta $6100,x
+    rep #$20
+.ACCU 16
+
+    lda $88
+    inc a
+    sta $88
+    lda $90
+    clc
+    adc $94
+    sta $90
+    lda $92
+    clc
+    adc $96
+    sta $92
+    lda $44
+    inc a
+    sta $44
+    cmp #112
+    bcc @Col
+
+    lda $40
+    inc a
+    sta $40
+    cmp #39
+    bcs @LoopBack
+    jmp @Row
+@LoopBack:
     jmp sa1_loop
 
 ;; -------------------------------------------------------
@@ -341,46 +449,42 @@ sa1_mul_8c:
 ;; Clobbers: $A2, $A4
 ;; -------------------------------------------------------
 sa1_div_112:
+    ; Divide by 112 using multiply-by-reciprocal (avoids buggy SA-1 divide)
+    ; a / 112 ≈ (|a| * 585) >> 16,  where 585 = 65536/112 = $0249
     rep #$20
 .ACCU 16
     stz $A2              ; neg flag = 0
     cmp #$8000
     bcc @DPos
     eor #$FFFF
-    inc a                ; negate dividend
-    inc $A2              ; neg = 1
+    inc a
+    inc $A2
 @DPos:
     sta $A4              ; |dividend|
     sep #$20
 .ACCU 8
-    lda #$01
-    sta $2250            ; $01 = divide mode
-    ; Write 32-bit dividend byte-by-byte
+    lda #$00
+    sta $2250            ; multiply mode
     lda $A4              ; |dividend| low byte
     sta $2251
     lda $A5              ; |dividend| high byte
     sta $2252
-    lda #$00             ; dividend bits 16-23
+    lda #$49             ; 585 low byte ($0249)
     sta $2253
-    lda #$00             ; dividend bits 24-31
+    lda #$02             ; 585 high byte — triggers multiply
     sta $2254
-    ; Write 16-bit divisor byte-by-byte
-    lda #112             ; divisor low byte
-    sta $2258
-    lda #$00             ; divisor high byte — TRIGGERS divide
-    sta $2259
     nop
     nop
     nop
     nop
-    nop                  ; 5 NOPs delay
+    nop
     rep #$20
 .ACCU 16
-    lda $2306            ; quotient
+    lda $2308            ; bits 16-31 of product = >>16 result
     ldx $A2
     beq @DNoNeg
     eor #$FFFF
-    inc a                ; negate quotient
+    inc a
 @DNoNeg:
     rts
 

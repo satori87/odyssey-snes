@@ -527,6 +527,7 @@ int main(void) {
     while (1) {
         dmaFramebuffer();       /* BlitPlay FIRST */
         handleInput();          /* d-pad movement + rotation */
+        startSA1Floor();        /* copy player state to BW-RAM for SA-1 */
         renderAllWalls();       /* fills column arrays */
         clearFramebuffer();     /* solid ceiling + floor base colors */
         copyFloorFromBWRAM();   /* copy SA-1 floor pixels to screenbuffer */
