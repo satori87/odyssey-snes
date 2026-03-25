@@ -136,37 +136,60 @@ tcc__start:
     lda.l $4211          ; read TIMEUP to acknowledge
 
     ; === SA-1 Initialization ===
+    ; DBR=$00 for absolute addressing to SA-1 registers
     sep #$20
-
-    ; Hold SA-1 in reset
     lda #$00
-    sta.l $2200
+    pha
+    plb                  ; DBR = $00
 
-    ; Clear I-RAM command/status bytes
-    sta.l $300C          ; IRAM_CMD = 0
-    sta.l $300D          ; IRAM_STATUS = 0
+    ; Step 1: Hold SA-1 in reset (bit 5 = 1 = RESET)
+    lda #$20
+    sta $2200            ; CCNT: SA-1 held in reset
 
-    ; Set ROM bank mapping (SA-1 Super MMC)
-    lda #$00
-    sta.l $2220          ; CXB: banks $00-$0F → ROM bank 0
-    lda #$01
-    sta.l $2221          ; DXB: banks $10-$1F → ROM bank 1
-    lda #$02
-    sta.l $2222          ; EXB: banks $20-$2F → ROM bank 2
-    lda #$03
-    sta.l $2223          ; FXB: banks $30-$3F → ROM bank 3
-
-    ; BW-RAM write enable for main CPU
+    ; Step 2: Clear pending interrupts
     lda #$80
-    sta.l $2225
+    sta $2202            ; SIC: clear IRQ flags
 
-    ; Set SA-1 reset vector AND IRQ vector to sa1_entry
+    ; Step 3: ROM bank mapping
+    lda #$00
+    sta $2220            ; CXB: $00-$1F → ROM bank 0
+    lda #$01
+    sta $2221            ; DXB: $20-$3F → ROM bank 1
+    lda #$02
+    sta $2222            ; EXB: $80-$9F → ROM bank 2
+    lda #$03
+    sta $2223            ; FXB: $A0-$BF → ROM bank 3
+
+    ; Step 4: BW-RAM configuration
+    lda #$00
+    sta $2224            ; BMAPS: SNES BW-RAM bank = 0
+    sta $2228            ; BWPA: deprotect all BW-RAM (default $FF = protected!)
+    lda #$80
+    sta $2226            ; SBWE: enable SNES CPU BW-RAM writes
+    sta $2227            ; CBWE: enable SA-1 CPU BW-RAM writes
+
+    ; Step 5: Set SA-1 vectors
     lda #<sa1_entry
-    sta.l $2203          ; reset vector low
-    sta.l $2207          ; IRQ vector low
+    sta $2203            ; reset vector low
+    sta $2205            ; NMI vector low
+    sta $2207            ; IRQ vector low
     lda #>sa1_entry
-    sta.l $2204          ; reset vector high
-    sta.l $2208          ; IRQ vector high
+    sta $2204            ; reset vector high
+    sta $2206            ; NMI vector high
+    sta $2208            ; IRQ vector high
+
+    ; Step 6: Release SA-1 (bit 5 = 0 = RUN)
+    lda #$00
+    sta $2200            ; CCNT: SA-1 starts executing at sa1_entry
+    nop
+    nop
+    nop
+    nop
+
+    ; Restore DBR=$7E for C runtime
+    lda #$7E
+    pha
+    plb
 
     ; Copy floor_tex (1024 bytes) to BW-RAM $40:1800 for SA-1 access
     rep #$30
@@ -174,10 +197,10 @@ tcc__start:
 .INDEX 16
     ldx #$0000
 @CpFloorTex:
-    lda.l floor_tex,x   ; main CPU reads from correct ROM bank
-    sta.l $401800,x      ; store to BW-RAM offset $1800
+    lda.l floor_tex,x
+    sta.l $401800,x
     inx
-    inx                  ; 16-bit copies, advance by 2
+    inx
     cpx #1024
     bcc @CpFloorTex
 
@@ -190,17 +213,6 @@ tcc__start:
     inx
     cpx #78
     bcc @CpRowDist
-
-    sep #$20
-
-    ; Release SA-1 from reset (bit 5 only, NO IRQ)
-    lda #$20
-    sta.l $2200
-    ; Small delay to let SA-1 start
-    nop
-    nop
-    nop
-    nop
 
     rep #$20
 
@@ -235,522 +247,141 @@ EmptyHandler:
 
 ;; -------------------------------------------------------
 ;; SA-1 entry point — MUST be in bank 0 (SA-1 resets to bank $00)
+;;
+;; Communication via BW-RAM:
+;;   $6000 = command (0=idle, 1=render floor)
+;;   $6001 = status  (0=busy, 1=done)
+;;   $6002-$600D = player state (posX/Y, dirX/Y, planeX/Y)
+;;   $6100+ = floor pixel buffer (39 rows × 112 cols = 4368 bytes)
+;;   $7800  = floor_tex (1024 bytes, copied from ROM at startup)
+;;   $7C00  = rowDist_table (78 bytes, copied from ROM at startup)
+;;
+;; SA-1 math registers ($2250):
+;;   bit 0: 0=multiply (unsigned 16×16→32), 1=divide (32÷16)
+;;   Multiply: write $2251-$2252 (A), $2253-$2254 (B, triggers)
+;;             result at $2306-$2309 (32-bit product)
+;;   Divide:   write $2251-$2254 (32-bit dividend), $2258-$2259 (divisor, triggers)
+;;             quotient at $2306-$2307, remainder at $2308-$2309
 ;; -------------------------------------------------------
 sa1_entry:
-    sei                  ; disable IRQs
+    sei
     clc
     xce                  ; native mode
     rep #$30
     lda #$07FF
-    tcs                  ; SA-1 stack in direct I-RAM ($0000-$07FF)
+    tcs                  ; SA-1 stack in I-RAM
     sep #$20
-    lda #$80
-    sta $2226            ; enable BW-RAM writes from SA-1
 
-    ; Communication via BW-RAM:
-    ; $6000 = command (0=idle, 1=render)
-    ; $6001 = status (0=busy, 1=done)
-    ; $6002-$600D = player state (12 bytes)
-    ; $600E-$607D = colDrawEnd (112 bytes)
-    ; $6100+ = floor pixel buffer (39*112 = 4368 bytes)
-    ; SA-1 continuously renders floor INLINE (no JSR)
+    ; Continuous fill — test BW-RAM writes
 sa1_loop:
-    rep #$30
-.ACCU 16
+    rep #$10
 .INDEX 16
-
-    ; DEBUG: write dirX high byte to first 112 floor pixels
-    ; If floor shows a non-zero color that changes when you rotate, SA-1 reads BW-RAM correctly
-    lda $6006            ; dirX from BW-RAM
-    xba                  ; high byte → low byte (8.8 integer part)
-    and #$000F           ; clamp to palette range 0-15
-    ora #$0001           ; ensure non-zero
     sep #$20
 .ACCU 8
     ldx #$0000
-@dbg:
-    sta $6100,x
+@fill:
+    lda #4               ; color 4
+    sta $6100,x          ; BW-RAM floor buffer
     inx
-    cpx #112
-    bne @dbg
-    rep #$20
-.ACCU 16
-
-    ; Precompute ray directions from BW-RAM player state
-    lda $6006
-    sec
-    sbc $600A
-    sta $80
-    lda $6008
-    sec
-    sbc $600C
-    sta $82
-    lda $600A
-    asl a
-    sta $84
-    lda $600C
-    asl a
-    sta $86
-
-    lda #$0000
-    sta $40
-    sta $88
-
-@Row:
-    lda $40
-    asl a
-    tax
-    lda $7C00,x
-    sta $8C
-
-    sep #$20
-    lda #$01
-    sta $2250
-    rep #$20
-
-    lda $8C
-    sta $2251
-    lda $80
-    sta $2253
-    nop
-    nop
-    nop
-    lda $2307
-    clc
-    adc $6002
-    sta $90
-
-    lda $8C
-    sta $2251
-    lda $82
-    sta $2253
-    nop
-    nop
-    nop
-    lda $2307
-    clc
-    adc $6004
-    sta $92
-
-    lda $8C
-    sta $2251
-    lda $84
-    sta $2253
-    nop
-    nop
-    nop
-    lda $2307
-    sta $94
-    bpl @SXP
-    eor #$FFFF
-    inc a
-    sta $94
-    sep #$20
-    lda #$02
-    sta $2250
-    rep #$20
-    lda $94
-    sta $2251
-    lda #$0000
-    sta $2253
-    lda #112
-    sta $2258
-    nop
-    nop
-    nop
-    nop
-    nop
-    lda $2306
-    eor #$FFFF
-    inc a
-    sta $94
-    bra @SXD
-@SXP:
-    sep #$20
-    lda #$02
-    sta $2250
-    rep #$20
-    lda $94
-    sta $2251
-    lda #$0000
-    sta $2253
-    lda #112
-    sta $2258
-    nop
-    nop
-    nop
-    nop
-    nop
-    lda $2306
-    sta $94
-@SXD:
-
-    sep #$20
-    lda #$01
-    sta $2250
-    rep #$20
-    lda $8C
-    sta $2251
-    lda $86
-    sta $2253
-    nop
-    nop
-    nop
-    lda $2307
-    sta $96
-    bpl @SYP
-    eor #$FFFF
-    inc a
-    sta $96
-    sep #$20
-    lda #$02
-    sta $2250
-    rep #$20
-    lda $96
-    sta $2251
-    lda #$0000
-    sta $2253
-    lda #112
-    sta $2258
-    nop
-    nop
-    nop
-    nop
-    nop
-    lda $2306
-    eor #$FFFF
-    inc a
-    sta $96
-    bra @SYD
-@SYP:
-    sep #$20
-    lda #$02
-    sta $2250
-    rep #$20
-    lda $96
-    sta $2251
-    lda #$0000
-    sta $2253
-    lda #112
-    sta $2258
-    nop
-    nop
-    nop
-    nop
-    nop
-    lda $2306
-    sta $96
-@SYD:
-
-    lda #$0000
-    sta $44
-
-@Col:
-    lda $90
-    lsr a
-    lsr a
-    lsr a
-    and #$001F
-    sta $9C
-    lda $92
-    lsr a
-    lsr a
-    lsr a
-    and #$001F
-    sta $9E
-    lda $9C
-    asl a
-    asl a
-    asl a
-    asl a
-    asl a
-    clc
-    adc $9E
-    tax
-    sep #$20
-.ACCU 8
-    lda $7800,x
-    ldx $88
-    sta $6100,x
-    rep #$20
-.ACCU 16
-
-    lda $88
-    inc a
-    sta $88
-    lda $90
-    clc
-    adc $94
-    sta $90
-    lda $92
-    clc
-    adc $96
-    sta $92
-    lda $44
-    inc a
-    sta $44
-    cmp #112
-    bcc @Col
-
-    lda $40
-    inc a
-    sta $40
-    cmp #39
-    bcs @LoopBack
-    jmp @Row
-@LoopBack:
+    cpx #4368            ; 39 * 112
+    bne @fill
     jmp sa1_loop
 
 ;; -------------------------------------------------------
-;; sa1_renderFloor -- SA-1 floor raycasting (row-major, Lodev style)
-;; Reads player state from BW-RAM ($6002-$600D)
-;; Reads floor_tex from BW-RAM ($7800, copied from ROM at startup)
-;; Writes floor pixels to BW-RAM ($6100+) row-major
-;; Uses SA-1 hardware multiply ($2250/$2251-$2254, result $2306-$2309)
+;; sa1_mul_8c — SA-1 unsigned multiply with manual sign handling
+;; Computes: ($8C * A) >> 8, treating A as signed, $8C as unsigned
+;; Input:  A = signed 16-bit value, $8C = unsigned 16-bit (rowDist)
+;; Output: A = signed 16-bit result
+;; Clobbers: $A0, $A2
 ;; -------------------------------------------------------
-sa1_renderFloor:
-    rep #$30
+sa1_mul_8c:
+    rep #$20
 .ACCU 16
-.INDEX 16
-
-    ; Precompute ray directions from BW-RAM player state
-    lda $6006            ; dirX
-    sec
-    sbc $600A            ; - planeX
-    sta $80              ; leftRayDirX
-    lda $6008            ; dirY
-    sec
-    sbc $600C            ; - planeY
-    sta $82              ; leftRayDirY
-    lda $600A            ; planeX
-    asl a
-    sta $84              ; 2*planeX
-    lda $600C            ; planeY
-    asl a
-    sta $86              ; 2*planeY
-
-    lda #$0000
-    sta $40              ; row index
-    sta $88              ; BW-RAM output offset
-
-@Row:
-    ; rowDist = rowDist_table[row] (in BW-RAM at $7C00)
-    lda $40
-    asl a
-    tax
-    lda $7C00,x
-    sta $8C              ; rowDist
-
-    ; Set SA-1 signed multiply mode
-    sep #$20
-    lda #$01
-    sta $2250
-    rep #$20
-
-    ; floorX = posX + fp_mul(rowDist, leftRayDirX)
-    lda $8C
-    sta $2251
-    lda $80
-    sta $2253
-    nop
-    nop
-    nop
-    lda $2307            ; bits 8-23 of 32-bit product
-    clc
-    adc $6002            ; + posX
-    sta $90              ; floorX
-
-    ; floorY = posY + fp_mul(rowDist, leftRayDirY)
-    lda $8C
-    sta $2251
-    lda $82
-    sta $2253
-    nop
-    nop
-    nop
-    lda $2307
-    clc
-    adc $6004            ; + posY
-    sta $92              ; floorY
-
-    ; floorStepX = fp_mul(rowDist, 2*planeX) / 112
-    lda $8C
-    sta $2251
-    lda $84
-    sta $2253
-    nop
-    nop
-    nop
-    lda $2307
-    sta $94
-    ; Signed divide by 112
-    bpl @SXP
+    stz $A2              ; neg flag = 0
+    cmp #$8000
+    bcc @MPos            ; branch if A positive (< $8000)
     eor #$FFFF
-    inc a
-    sta $94
-    sep #$20
-    lda #$02
-    sta $2250            ; unsigned divide mode
-    rep #$20
-    lda $94
-    sta $2251
-    lda #$0000
-    sta $2253
-    lda #112
-    sta $2258
-    nop
-    nop
-    nop
-    nop
-    nop
-    lda $2306
-    eor #$FFFF
-    inc a
-    sta $94
-    bra @SXD
-@SXP:
-    sep #$20
-    lda #$02
-    sta $2250
-    rep #$20
-    lda $94
-    sta $2251
-    lda #$0000
-    sta $2253
-    lda #112
-    sta $2258
-    nop
-    nop
-    nop
-    nop
-    nop
-    lda $2306
-    sta $94
-@SXD:
-
-    ; floorStepY = fp_mul(rowDist, 2*planeY) / 112
-    sep #$20
-    lda #$01
-    sta $2250            ; signed multiply
-    rep #$20
-    lda $8C
-    sta $2251
-    lda $86
-    sta $2253
-    nop
-    nop
-    nop
-    lda $2307
-    sta $96
-    bpl @SYP
-    eor #$FFFF
-    inc a
-    sta $96
-    sep #$20
-    lda #$02
-    sta $2250
-    rep #$20
-    lda $96
-    sta $2251
-    lda #$0000
-    sta $2253
-    lda #112
-    sta $2258
-    nop
-    nop
-    nop
-    nop
-    nop
-    lda $2306
-    eor #$FFFF
-    inc a
-    sta $96
-    bra @SYD
-@SYP:
-    sep #$20
-    lda #$02
-    sta $2250
-    rep #$20
-    lda $96
-    sta $2251
-    lda #$0000
-    sta $2253
-    lda #112
-    sta $2258
-    nop
-    nop
-    nop
-    nop
-    nop
-    lda $2306
-    sta $96
-@SYD:
-
-    ; Column loop: step floorX/Y across 112 columns
-    lda #$0000
-    sta $44
-
-@Col:
-    ; texU = (floorX >> 3) & 31
-    lda $90
-    lsr a
-    lsr a
-    lsr a
-    and #$001F
-    sta $9C
-    ; texV = (floorY >> 3) & 31
-    lda $92
-    lsr a
-    lsr a
-    lsr a
-    and #$001F
-    ; texAddr = texU * 32 + texV
-    sta $9E
-    lda $9C
-    asl a
-    asl a
-    asl a
-    asl a
-    asl a
-    clc
-    adc $9E
-    tax
-    ; Read floor texture from BW-RAM ($7800)
+    inc a                ; negate A
+    inc $A2              ; neg = 1
+@MPos:
+    sta $A0              ; |value|
     sep #$20
 .ACCU 8
-    lda $7800,x
-    ; Write to BW-RAM floor buffer ($6100 + offset)
-    ldx $88
-    sta $6100,x
+    lda #$00
+    sta $2250            ; $00 = unsigned multiply mode
+    ; Write multiplicand A byte-by-byte (rowDist at $8C-$8D)
+    lda $8C              ; rowDist low byte
+    sta $2251
+    lda $8D              ; rowDist high byte
+    sta $2252
+    ; Write multiplicand B byte-by-byte (|value| at $A0-$A1)
+    lda $A0              ; |value| low byte
+    sta $2253
+    lda $A1              ; |value| high byte — TRIGGERS multiply
+    sta $2254
+    nop
+    nop
+    nop
+    nop
+    nop                  ; 5 NOPs = 10 cycles (multiply takes 5)
     rep #$20
 .ACCU 16
+    lda $2307            ; bits 8-23 of 32-bit product = >>8
+    ldx $A2
+    beq @MNoNeg
+    eor #$FFFF
+    inc a                ; negate result
+@MNoNeg:
+    rts
 
-    ; Advance
-    lda $88
-    inc a
-    sta $88
-    lda $90
-    clc
-    adc $94              ; floorX += stepX
-    sta $90
-    lda $92
-    clc
-    adc $96              ; floorY += stepY
-    sta $92
-    lda $44
-    inc a
-    sta $44
-    cmp #112
-    bcc @Col
-
-    ; Next row
-    lda $40
-    inc a
-    sta $40
-    cmp #39
-    bcs @Done
-    jmp @Row
-@Done:
+;; -------------------------------------------------------
+;; sa1_div_112 — SA-1 signed divide by 112
+;; Input:  A = signed 16-bit dividend
+;; Output: A = signed 16-bit quotient
+;; Clobbers: $A2, $A4
+;; -------------------------------------------------------
+sa1_div_112:
+    rep #$20
+.ACCU 16
+    stz $A2              ; neg flag = 0
+    cmp #$8000
+    bcc @DPos
+    eor #$FFFF
+    inc a                ; negate dividend
+    inc $A2              ; neg = 1
+@DPos:
+    sta $A4              ; |dividend|
+    sep #$20
+.ACCU 8
+    lda #$01
+    sta $2250            ; $01 = divide mode
+    ; Write 32-bit dividend byte-by-byte
+    lda $A4              ; |dividend| low byte
+    sta $2251
+    lda $A5              ; |dividend| high byte
+    sta $2252
+    lda #$00             ; dividend bits 16-23
+    sta $2253
+    lda #$00             ; dividend bits 24-31
+    sta $2254
+    ; Write 16-bit divisor byte-by-byte
+    lda #112             ; divisor low byte
+    sta $2258
+    lda #$00             ; divisor high byte — TRIGGERS divide
+    sta $2259
+    nop
+    nop
+    nop
+    nop
+    nop                  ; 5 NOPs delay
+    rep #$20
+.ACCU 16
+    lda $2306            ; quotient
+    ldx $A2
+    beq @DNoNeg
+    eor #$FFFF
+    inc a                ; negate quotient
+@DNoNeg:
     rts
 
 

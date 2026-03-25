@@ -59,6 +59,7 @@ extern void dmaFramebuffer(void);
 extern void fillTestWall(void);
 extern void renderFloorCPU(void);
 extern void startSA1Floor(void);
+extern void waitSA1Floor(void);
 extern void copyFloorFromBWRAM(void);
 extern void initColumnArrays(void);
 extern void renderOneWall(void);
@@ -524,12 +525,12 @@ int main(void) {
     renderColumns();
 
     while (1) {
-        dmaFramebuffer();   /* BlitPlay FIRST */
-        handleInput();      /* d-pad movement + rotation */
-        renderAllWalls();   /* fills column arrays */
-        clearFramebuffer(); /* solid ceiling + floor */
-        renderFloorCPU();   /* main CPU floor texture */
-        renderColumns();    /* walls drawn LAST — overwrite floor */
+        dmaFramebuffer();       /* BlitPlay FIRST */
+        handleInput();          /* d-pad movement + rotation */
+        renderAllWalls();       /* fills column arrays */
+        clearFramebuffer();     /* solid ceiling + floor base colors */
+        copyFloorFromBWRAM();   /* copy SA-1 floor pixels to screenbuffer */
+        renderColumns();        /* walls drawn LAST — overwrite floor */
     }
 
     return 0;

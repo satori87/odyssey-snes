@@ -2481,7 +2481,7 @@ renderFloorCPU:
 @FRDone:
     plp
     rtl
-;; startSA1Floor -- copy player state to I-RAM, trigger SA-1
+;; startSA1Floor -- copy player state to BW-RAM, trigger SA-1
 ;; -------------------------------------------------------
 startSA1Floor:
     php
@@ -2501,25 +2501,24 @@ startSA1Floor:
     sta.l $40000A
     lda.l planeY
     sta.l $40000C
-    ; Copy colDrawEnd to BW-RAM ($40:000E-$40:007D)
+    ; DIAGNOSTIC: Read I-RAM $3700 (SA-1 wrote $05 there)
+    ; Fill floor buffer with whatever value is at I-RAM
+    ; If SA-1 is executing: floor = color 5
+    ; If SA-1 is NOT executing: floor = color 0 (or whatever default)
     sep #$20
 .ACCU 8
+    rep #$10
+.INDEX 16
+    lda.l $003700        ; read I-RAM byte $700 (SA-1 address $0700)
     ldx #$0000
-@CpEnd:
-    lda.l colDrawEnd,x
-    sta.l $40000E,x
+@DiagIRAM:
+    sta.l $400100,x      ; fill floor buffer with I-RAM value
     inx
-    cpx #112
-    bne @CpEnd
-    ; Write test pattern to floor buffer to verify copy reads correctly
-    ; Main CPU writes color 7 to first 112 bytes of floor buffer
-    ldx #$0000
-@TestWrite:
-    lda #7
-    sta.l $400100,x      ; BW-RAM offset $0100 = SA-1 $6100
-    inx
-    cpx #112
-    bne @TestWrite
+    cpx #4368
+    bne @DiagIRAM
+
+    lda #$01
+    sta.l $400000        ; command byte
     plp
     rtl
 
@@ -2553,25 +2552,8 @@ waitSA1Floor:
 
 ;; -------------------------------------------------------
 ;; copyFloorFromBWRAM -- copy SA-1 floor pixels to WRAM screenbuffer
-;; Reads row-major from BW-RAM ($40:0000), writes column-major via WMDATA
+;; Reads row-major from BW-RAM ($40:0100), writes column-major via WMDATA
 ;; -------------------------------------------------------
-;; testFillBWRAM — main CPU fills BW-RAM with test pattern (no SA-1 needed)
-testFillBWRAM:
-    php
-    sep #$20
-    rep #$10
-.ACCU 8
-.INDEX 16
-    ldx #$0000
-@TFill:
-    lda #5               ; palette index 5 (visible color)
-    sta.l $400000,x      ; BW-RAM at $40:0000+X
-    inx
-    cpx #4368            ; 39 rows × 112 cols
-    bne @TFill
-    plp
-    rtl
-
 copyFloorFromBWRAM:
     php
     sep #$20
@@ -2579,50 +2561,12 @@ copyFloorFromBWRAM:
 .ACCU 8
 .INDEX 16
 
-    ; DEBUG: write pixel to top-left of screenbuffer to prove this runs
-    lda #$7F
-    sta.l $2183          ; WMBANK
-    lda #$00
-    sta.l $2181          ; WMADD low = $00
-    lda #$20
-    sta.l $2182          ; WMADD mid = $20 → address $2000
-    lda #15              ; bright color
-    sta.l $2180          ; row 0 (debug pixel) — WMADD auto-increments
-    lda #12
-    sta.l $2180          ; row 1 (auto-inc, no address reset)
-    sta.l $2180          ; row 2
-    sta.l $2180          ; row 3
-    sta.l $2180          ; row 4
-    sta.l $2180          ; row 5
-    sta.l $2180          ; row 6
-    sta.l $2180          ; row 7
-    sta.l $2180          ; row 8
-    sta.l $2180          ; row 9
-    sta.l $2180          ; row 10
-    sta.l $2180          ; row 11
-    sta.l $2180          ; row 12
-    sta.l $2180          ; row 13
-    sta.l $2180          ; row 14
-    sta.l $2180          ; row 15
-    sta.l $2180          ; row 16
-    sta.l $2180          ; row 17
-    sta.l $2180          ; row 18
-    sta.l $2180          ; row 19
-
     ; WMBANK = $7F
     lda #$7F
     sta.l $2183
 
-    ; 24-bit pointer to BW-RAM floor buffer ($40:0100 = SA-1 $6100)
-    lda #$00
-    sta $50              ; low
-    lda #$01
-    sta $51              ; mid → address $0100
-    lda #$40
-    sta $52              ; bank $40
-
-    ; Column-major copy: WMADD set once per column, auto-increments
-    ; Walls draw AFTER this, so write all 39 floor rows unconditionally
+    ; Column-major copy: read BW-RAM via long indexed X, write WRAM via WMADD
+    ; BW-RAM floor buffer at $40:0100 (= SA-1 $6100)
     ldx #$0000           ; column index
 
 @CFCol:
@@ -2662,8 +2606,8 @@ copyFloorFromBWRAM:
     lda #39
     sta $40              ; pixel count
 @CFPix:
-    ;lda [$50],y          ; DISABLED: read BW-RAM floor pixel
-    lda #1               ; HARDCODED TEST: color 1
+    tyx                  ; X = BW-RAM offset (swap from Y for long indexed read)
+    lda $400100,x        ; read BW-RAM floor pixel (long indexed X)
     sta.l $2180          ; WMADD auto-increments!
     rep #$20
 .ACCU 16
