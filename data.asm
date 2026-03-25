@@ -1364,6 +1364,21 @@ renderOneWall:
     sta $4C
 @NoClipR:
 
+    ; --- Step 3b: Check solidsegs — skip if fully covered ---
+    ; Convert view-relative angles to unsigned (+ ANGLE180)
+    lda $4A
+    clc
+    adc #$8000           ; angle1 + ANGLE180 = "top" (left, larger)
+    sta $A8
+    lda $4C
+    clc
+    adc #$8000           ; angle2 + ANGLE180 = "bottom" (right, smaller)
+    sta $AA
+    jsr checkSolidSegs
+    beq @NotCovered      ; zero = visible → continue
+    jmp @Done            ; nonzero = fully covered → skip
+@NotCovered:
+
     ; --- Step 4: Convert angles to screen columns via viewangletox ---
     ; rw_x = viewangletox[(a1 + ANG90) >> ANGLETOFINESHIFT]
     lda $4A
@@ -1618,9 +1633,65 @@ renderOneWall:
     bcs @DoneFill
     jmp @FillCol
 @DoneFill:
+    ; Add rendered range to solidsegs
+    rep #$20
+.ACCU 16
+    jsr addSolidSeg
 @Done:
     plp
     rts                  ; called via JSR from renderAllWalls (same bank)
+
+;; -------------------------------------------------------
+;; checkSolidSegs — is angular range [$A8(top),$AA(bottom)] fully covered?
+;; Returns A: nonzero = covered (skip), zero = visible (render)
+;; -------------------------------------------------------
+checkSolidSegs:
+.ACCU 16
+.INDEX 16
+    lda.l ss_count
+    beq @SSVisible        ; no entries → visible
+    sta $AC               ; loop counter
+    ldx #$0000
+@SSLoop:
+    ; Covered if: entry.top >= our top AND entry.bottom <= our bottom
+    lda.l ss_top,x
+    cmp $A8               ; entry.top vs our top
+    bcc @SSNext           ; entry.top < our top → doesn't fully cover left
+    lda $AA               ; our bottom
+    cmp.l ss_bot,x        ; our bottom vs entry.bottom
+    bcc @SSNext           ; our bottom < entry.bottom → doesn't cover right
+    ; Fully covered!
+    lda #$0001
+    rts
+@SSNext:
+    inx
+    inx                   ; +2 bytes per word entry
+    dec $AC
+    bne @SSLoop
+@SSVisible:
+    lda #$0000
+    rts
+
+;; -------------------------------------------------------
+;; addSolidSeg — add range [$A8(top),$AA(bottom)] to solidsegs
+;; -------------------------------------------------------
+addSolidSeg:
+.ACCU 16
+.INDEX 16
+    lda.l ss_count
+    cmp #16
+    bcs @SSFull           ; list full, can't add
+    asl a                 ; *2 for word index
+    tax
+    lda $A8               ; top
+    sta.l ss_top,x
+    lda $AA               ; bottom
+    sta.l ss_bot,x
+    lda.l ss_count
+    inc a
+    sta.l ss_count
+@SSFull:
+    rts
 
 ;; colDrawn: 112 bytes in RAM (allocated in .ramsection at end of file)
 
@@ -2056,6 +2127,7 @@ renderAllWalls:
     rep #$20
     lda #$0000
     sta.l colsFilled     ; 0 columns filled
+    sta.l ss_count       ; 0 solidsegs entries
 
     ; BSP traversal from root (entry 0, byte offset 0)
     ldx #0
@@ -2120,5 +2192,8 @@ colDrawn dsb 112
 colsFilled dsb 2
 colTexCol dsb 112
 colFullH dsb 112
+ss_top dsb 32            ; solidsegs top angles (16 entries × 2 bytes)
+ss_bot dsb 32            ; solidsegs bottom angles (16 entries × 2 bytes)
+ss_count dsb 2           ; number of solidsegs entries
 .ends
 
