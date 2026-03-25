@@ -1518,6 +1518,7 @@ renderOneWall:
     sta $7E              ; stop
     lda $74              ; current_scale = scale1
     sta $7A              ; reuse $7A for current_scale
+    ; texU_current = texU_start (in $B8)
     sep #$20
 .ACCU 8
 @FillCol:
@@ -1570,7 +1571,7 @@ renderOneWall:
     lda $2A
     sta.l colWallColor,x ; stores texture ID (1 or 2)
 
-    ; --- Compute texture U column (Noah's tangent formula) ---
+    ; --- Compute texture U column (Noah's tangent formula, per column) ---
     ; angle = rw_centerangle + xtoviewangle[x]
     ; texU_world = fp_mul(finetangent[angle], perpDist)
     ; Adjust by midpoint ± texU_world depending on downside
