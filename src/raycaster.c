@@ -34,8 +34,8 @@ typedef signed long long s32;
 #define MAX_STEPS 24
 
 /* Movement speed in 8.8 fixed point */
-#define MOVE_SPEED 20       /* movement speed */
-#define ROT_SPEED  2        /* slower rotation */
+#define MOVE_SPEED 40       /* movement speed */
+#define ROT_SPEED  4        /* rotation speed */
 
 /* Wall color indices */
 #define WALL_BRIGHT 5
