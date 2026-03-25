@@ -502,9 +502,10 @@ testWMADD:
     rtl
 
 ;; -------------------------------------------------------
-;; renderColumns -- write wall portions to screenbuffer
-;; Reads colDrawStart[112], colDrawEnd[112], colWallColor[112]
-;; Only overwrites the wall band (ceiling/floor from DMA clear)
+;; renderColumns -- textured wall rendering
+;; Reads colDrawStart/End, colTexCol, colFullH, colWallColor (texID)
+;; For each column: copies 32-byte texture column to DP $B0-$CF,
+;; then vertically scales texture pixels to wall height.
 ;; WMBANK ($2183) already set by clearFramebuffer DMA
 ;; -------------------------------------------------------
 renderColumns:
@@ -520,19 +521,58 @@ renderColumns:
     lda.l colDrawEnd,x
     sec
     sbc.l colDrawStart,x
-    beq @Next            ; drawEnd == drawStart → no wall
-
-    ; Save pixel count and column index
-    sta $18              ; count (8-bit)
+    bne @HasWall
+    jmp @Next            ; no wall pixels
+@HasWall:
+    sta $18              ; wallPixels = drawEnd - drawStart
     stx $16              ; save col index
 
-    ; Read drawStart and wall color
+    ; Read parameters
     lda.l colDrawStart,x
-    sta $10
+    sta $10              ; drawStart
+    lda.l colFullH,x
+    sta $13              ; fullH (unclamped, 0-255)
+    bne @HasFullH
+    jmp @NextR           ; fullH == 0 → skip
+@HasFullH:
+    lda.l colTexCol,x
+    sta $19              ; texCol (0-31)
     lda.l colWallColor,x
-    sta $12
+    sta $1A              ; texID (1 or 2)
 
-    ; Compute WMADD = columnstart[col] + drawStart
+    ; --- Copy 32-byte texture column to DP $B0-$CF ---
+    ; texOffset = tex_ptrs[texID] + texCol * 32
+    rep #$20
+.ACCU 16
+    lda $1A
+    and #$00FF
+    asl a                ; *2 for word index
+    tax
+    lda.l tex_ptrs,x     ; texture base offset within tex_base
+    sta $1C
+    lda $19
+    and #$00FF
+    asl a
+    asl a
+    asl a
+    asl a
+    asl a                ; texCol * 32
+    clc
+    adc $1C              ; + texture base offset
+    tax                  ; X = byte offset into tex_base
+    sep #$20
+.ACCU 8
+    ldy #$0000
+@CopyTex:
+    lda.l tex_base,x
+    sta $B0,y            ; DP buffer $B0-$CF
+    inx
+    iny
+    cpy #32
+    bne @CopyTex
+
+    ; --- Set WMADD = columnstart[col] + drawStart ---
+    ldx $16              ; restore col index
     rep #$20
 .ACCU 16
     txa
@@ -545,34 +585,112 @@ renderColumns:
 .ACCU 8
     lda $14
     clc
-    adc $10
+    adc $10              ; + drawStart
     sta.l $2181          ; WMADDL
     lda $15
     adc #$00
     sta.l $2182          ; WMADDM
 
-    ; Restore col index
-    ldx $16
+    ; --- Choose rendering path ---
+    ; If fullH <= 40: use compiled scaler (fast, no per-pixel loop)
+    ; If fullH > 40: fall back to per-pixel loop (close walls)
+    lda $13              ; fullH
+    cmp #41
+    bcs @SlowPath
 
-    ; Write pixels: load color ONCE, loop with sta only
-    lda $18              ; count
+    ; --- FAST PATH: Compiled scaler (fullH 1-80) ---
+    ; No clamping needed — fullH == visibleH
+    ; DP $B0-$CF has texture column, scaler reads from it directly
+    rep #$30
+.ACCU 16
+.INDEX 16
+    lda $13
+    and #$00FF
+    asl a                ; *2 for word table index
+    tax
+    jsl _call_scaler     ; trampoline in scaler bank (reads X for ptr)
+    sep #$20
+    rep #$10
+.ACCU 8
+.INDEX 16
+    jmp @NextR
+
+@SlowPath:
+    ; --- SLOW PATH: Per-pixel loop for walls taller than screen ---
+    ; Compute texStep = 8192 / fullH
     rep #$20
 .ACCU 16
-    and #$00FF           ; zero-extend (clear B register)
-    tay
+    lda #$2000           ; 8192
     sep #$20
 .ACCU 8
-    lda $12              ; wall color (loaded ONCE)
-@Pix:
-    sta.l $2180          ; 5 cycles
-    dey                  ; 2 cycles
-    bne @Pix             ; 3 cycles = 10 cycles/pixel (was 13)
+    sta.l $4204
+    xba
+    sta.l $4205
+    lda $13              ; fullH
+    sta.l $4206
+    rep #$20
+.ACCU 16
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    lda.l $4214          ; texStep
+    sta $1E
 
+    ; texOfs = skippedRows * texStep
+    lda $13
+    and #$00FF
+    lsr a                ; fullH/2
+    sta $4E
+    lda #40
+    sec
+    sbc $4E              ; idealStart
+    sta $4E
+    lda $10
+    and #$00FF
+    sec
+    sbc $4E              ; skippedRows
+    and #$00FF
+    xba                  ; << 8
+    tay
+    lda $1E
+    jsr fp_mul_hw        ; texOfs = skippedRows * texStep
+    sta $20
+
+    ; Per-pixel texture scaling loop
+    sep #$30
+.ACCU 8
+.INDEX 8
+    ldy $18              ; pixel count
+@Pix:
+    ldx $21              ; texRow = texOfs high byte
+    lda $B0,x            ; texture pixel from DP buffer
+    sta.l $2180          ; write to screenbuffer
+    lda $20
+    clc
+    adc $1E
+    sta $20
+    lda $21
+    adc $1F
+    and #$1F
+    sta $21
+    dey
+    bne @Pix
+
+    rep #$10
+.INDEX 16
+@NextR:
+    ldx $16              ; restore col index
 @Next:
     inx
     cpx #112
-    bne @Col
-
+    beq @AllDone
+    jmp @Col
+@AllDone:
     plp
     rtl
 
@@ -1389,7 +1507,9 @@ renderOneWall:
 .ACCU 8
 @FillCol:
     lda.l colDrawn,x
-    bne @SkipCol2
+    beq @NotDrawn
+    jmp @SkipCol2
+@NotDrawn:
     lda #$01
     sta.l colDrawn,x
     rep #$20
@@ -1405,6 +1525,13 @@ renderOneWall:
     lda $7A              ; current_scale
     xba                  ; >> 8
     and #$00FF
+    ; Store unclamped full height for texture scaling
+    sep #$20
+.ACCU 8
+    sta.l colFullH,x
+    rep #$20
+.ACCU 16
+    and #$00FF           ; re-extend
     cmp #80
     bcc @NcH3
     lda #80
@@ -1426,7 +1553,51 @@ renderOneWall:
 @NcE3:
     sta.l colDrawEnd,x
     lda $2A
-    sta.l colWallColor,x
+    sta.l colWallColor,x ; stores texture ID (1 or 2)
+
+    ; --- Compute texture U column (Noah's tangent formula) ---
+    ; angle = rw_centerangle + xtoviewangle[x]
+    ; texU_world = fp_mul(finetangent[angle], perpDist)
+    ; Adjust by midpoint ± texU_world depending on downside
+    ; texCol = (texU_world >> 3) & 31
+    rep #$20
+.ACCU 16
+    phx                  ; save column index
+    txa
+    and #$00FF
+    asl a                ; *2 for word index into xtoviewangle
+    tax
+    lda.l xtoviewangle,x ; signed fine angle offset for this column
+    clc
+    adc $A0              ; + rw_centerangle
+    and #$03FF           ; mask to 1024 entries (finetangent range)
+    asl a                ; *2 for word index
+    tax
+    lda.l finetangent,x  ; signed 8.8 tangent value
+    tay                  ; Y = tangent
+    lda $28              ; A = perpDist
+    jsr fp_mul_hw        ; result = tangent * perpDist
+    sta $A6              ; texU_offset
+    lda $A4              ; downside
+    bne @TexDown
+    lda $A2              ; midpoint
+    clc
+    adc $A6              ; + texU_offset
+    bra @TexDone2
+@TexDown:
+    lda $A2              ; midpoint
+    sec
+    sbc $A6              ; - texU_offset
+@TexDone2:
+    ; texCol = (texU_world >> 3) & 31
+    lsr a
+    lsr a
+    lsr a                ; >> 3
+    and #$001F           ; & 31
+    plx                  ; restore column index
+    sep #$20
+.ACCU 8
+    sta.l colTexCol,x    ; store texture column
 @SkipCol2:
     ; Advance scale
     rep #$20
@@ -1444,7 +1615,8 @@ renderOneWall:
     cmp $7E
     sep #$20
 .ACCU 8
-    bcc @FillCol
+    bcs @DoneFill
+    jmp @FillCol
 @DoneFill:
 @Done:
     plp
@@ -1504,12 +1676,36 @@ bsp_rom_data:
     .db 8, 128, 8, 12, 2, 0     ; [42] seg: N, span=8-12, tex=2
     .db 8, 195, 8, 12, 2, 0     ; [43] seg: W+last, span=8-12, tex=2
 
-;; Color table: texColors[texture*2 + (direction & 1)]
-;; direction & 1: 0 = N/S face (dark), 1 = E/W face (bright)
-texColors:
-    .db 0, 0             ; texture 0 (unused)
-    .db 4, 5             ; texture 1: dark=4, bright=5 (outer walls)
-    .db 7, 6             ; texture 2: dark=7, bright=6 (pillar)
+;; Texture pointer table: tex_ptrs[texID] = offset from tex_base
+;; texID 1 = outer wall, texID 2 = inner wall
+tex_ptrs:
+    .dw 0                                    ; texture 0 (unused)
+    .dw 0                                    ; texture 1 = outer (at tex_base+0)
+    .dw 1024                                 ; texture 2 = inner (at tex_base+1024)
+
+;; Texture pixel data: 32x32, column-major, 1 byte per pixel (palette index)
+;; Each texture column = 32 consecutive bytes. texCol N starts at offset N*32.
+;; Texture 1 (outer wall, tile 1) at offset 0, Texture 2 (inner wall, tile 23) at offset 1024
+tex_base:
+.include "data/wall_textures.asm"
+
+;; computeCenterAngle — compute rw_centerangle from $70 and $2C, store in $A0
+;; Must be called after $2C (normalangle) is set, and $70 (centerangle_fine) exists
+computeCenterAngle:
+.ACCU 16
+    lda $70              ; centerangle_fine
+    sec
+    sbc $2C              ; - normalangle_fine
+    and #$07FF           ; & FINEMASK (2047)
+    cmp #1024            ; > FINEANGLES/2?
+    bcc @NoWrapCA
+    sec
+    sbc #2048            ; -= FINEANGLES
+@NoWrapCA:
+    clc
+    adc #512             ; += FINEANGLES/4
+    sta $A0              ; rw_centerangle
+    rts
 
 ;; -------------------------------------------------------
 ;; drawOneSeg -- translate BSP segment into renderOneWall call
@@ -1548,25 +1744,46 @@ drawOneSeg:
     lsr a
     sta $86              ; maxtex
 
-    ; texture
+    ; texture ID → $2A (used by renderOneWall to store in colWallColor)
     lda.l bsp_rom_data+4,x
     and #$00FF
     sta $88              ; texture (1 or 2)
-
-    ; Color lookup: texColors[texture * 2 + (direction & 1)]
-    asl a                ; texture * 2
-    sta $8A
-    lda $82
-    and #$0001           ; 0=N/S(dark), 1=E/W(bright)
-    clc
-    adc $8A              ; index
-    tax
     sep #$20
 .ACCU 8
-    lda.l texColors,x
-    sta $2A              ; wall color
+    sta $2A              ; store texture ID (not color) in $2A
     rep #$20
 .ACCU 16
+
+    ; Compute rw_centerangle for texture mapping
+    ; rw_centerangle = (centerangle_fine - normalangle_fine) & FINEMASK
+    ; Then adjust: if > FINEANGLES/2, subtract FINEANGLES; add FINEANGLES/4
+    ; NOTE: $70 = centerangle_fine, $2C = normalangle_fine (set per direction below)
+
+    ; Set midpoint and downside based on direction
+    ; BSP 0(N)=di_west: midpoint=posX, downside=0
+    ; BSP 1(E)=di_north: midpoint=posY, downside=0
+    ; BSP 2(S)=di_east: midpoint=posX, downside=1
+    ; BSP 3(W)=di_south: midpoint=posY, downside=1
+    lda $82              ; direction
+    cmp #2
+    bcs @DownSide        ; dir >= 2 → downside = 1
+    lda #0
+    sta $A4              ; downside = 0
+    bra @SetMid
+@DownSide:
+    lda #1
+    sta $A4              ; downside = 1
+@SetMid:
+    lda $82
+    and #$0001           ; bit 0: 0=N/S(fixedY, mid=posX), 1=E/W(fixedX, mid=posY)
+    bne @MidY
+    lda.l posX
+    sta $A2              ; midpoint = posX (for N/S faces)
+    bra @MidDone
+@MidY:
+    lda.l posY
+    sta $A2              ; midpoint = posY (for E/W faces)
+@MidDone:
 
     ; Switch on direction
     lda $82
@@ -1594,8 +1811,9 @@ drawOneSeg:
     sta $24    ; x2 = segplane
     lda $86
     sta $26    ; y2 = maxtex
-    lda #0  
+    lda #0
     sta $2C   ; normalangle = 0
+    jsr computeCenterAngle
     jsr renderOneWall
     rts
 
@@ -1618,6 +1836,7 @@ drawOneSeg:
     sta $26    ; y2 = segplane
     lda #1536
     sta $2C  ; normalangle = 3*512
+    jsr computeCenterAngle
     jsr renderOneWall
     rts
 
@@ -1640,6 +1859,7 @@ drawOneSeg:
     sta $26    ; y2 = mintex
     lda #1024
     sta $2C  ; normalangle = 2*512
+    jsr computeCenterAngle
     jsr renderOneWall
     rts
 
@@ -1662,6 +1882,7 @@ drawOneSeg:
     sta $26    ; y2 = segplane
     lda #512
     sta $2C   ; normalangle = 1*512
+    jsr computeCenterAngle
     jsr renderOneWall
     rts
 
@@ -1889,9 +2110,16 @@ playback_bg:
 .ENDR
 .ENDR
 
+;; Compiled wall scalers (heights 1-40, 4.9KB)
+;; Heights 41-80 use per-pixel fallback in renderColumns
+.include "data/compiled_scalers.asm"
+
 .ends
 
 .ramsection ".coldrawn" slot 2 bank 126
 colDrawn dsb 112
 colsFilled dsb 2
+colTexCol dsb 112
+colFullH dsb 112
 .ends
+

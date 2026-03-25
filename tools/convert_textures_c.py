@@ -192,16 +192,16 @@ def main():
     print(f"Loaded walls.png:  {walls_img.size[0]}x{walls_img.size[1]} ({walls_img.mode})")
     print(f"Loaded floors.png: {floors_img.size[0]}x{floors_img.size[1]} ({floors_img.mode})")
 
-    # Extract tiles:
-    # Outer wall: walls.png tile (0,2)
-    # Inner wall: walls.png tile (6,2)
+    # Extract tiles (1-based numbering, 8 tiles per row):
+    # Outer wall: tile 1 = (col=0, row=0)
+    # Inner wall: tile 23 = (col=6, row=2)
     # Floor: floors.png tile (0,7)
-    outer_wall_tile = extract_tile(walls_img, col=0, row=2)
+    outer_wall_tile = extract_tile(walls_img, col=0, row=0)
     inner_wall_tile = extract_tile(walls_img, col=6, row=2)
     floor_tile = extract_tile(floors_img, col=0, row=7)
 
-    print(f"Outer wall: col=0, row=2 from walls.png")
-    print(f"Inner wall: col=6, row=2 from walls.png")
+    print(f"Outer wall: tile 1, col=0, row=0 from walls.png")
+    print(f"Inner wall: tile 23, col=6, row=2 from walls.png")
     print(f"Floor tile: col=0, row=7 from floors.png")
 
     # Get pixel data
