@@ -592,10 +592,10 @@ renderColumns:
     sta.l $2182          ; WMADDM
 
     ; --- Choose rendering path ---
-    ; If fullH <= 40: use compiled scaler (fast, no per-pixel loop)
-    ; If fullH > 40: fall back to per-pixel loop (close walls)
+    ; If fullH <= 80: use compiled scaler (fast, no per-pixel loop)
+    ; If fullH > 80: fall back to per-pixel loop (wall taller than screen)
     lda $13              ; fullH
-    cmp #41
+    cmp #81
     bcs @SlowPath
 
     ; --- FAST PATH: Compiled scaler (fullH 1-80) ---
@@ -2110,11 +2110,10 @@ playback_bg:
 .ENDR
 .ENDR
 
-;; Compiled wall scalers (heights 1-40, 4.9KB)
-;; Heights 41-80 use per-pixel fallback in renderColumns
-.include "data/compiled_scalers.asm"
-
 .ends
+
+;; Compiled wall scalers (heights 1-80) in ROM bank 2
+.include "data/compiled_scalers.asm"
 
 .ramsection ".coldrawn" slot 2 bank 126
 colDrawn dsb 112
