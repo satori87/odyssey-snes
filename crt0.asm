@@ -134,6 +134,44 @@ tcc__start:
     sep #$20
     lda.l $4210          ; read RDNMI to acknowledge
     lda.l $4211          ; read TIMEUP to acknowledge
+
+    ; === SA-1 Initialization ===
+    sep #$20
+
+    ; Hold SA-1 in reset
+    lda #$00
+    sta.l $2200
+
+    ; Clear I-RAM command/status bytes
+    sta.l $300C          ; IRAM_CMD = 0
+    sta.l $300D          ; IRAM_STATUS = 0
+
+    ; Set ROM bank mapping (SA-1 Super MMC)
+    lda #$00
+    sta.l $2220          ; CXB: banks $00-$0F → ROM bank 0
+    lda #$01
+    sta.l $2221          ; DXB: banks $10-$1F → ROM bank 1
+    lda #$02
+    sta.l $2222          ; EXB: banks $20-$2F → ROM bank 2
+    lda #$03
+    sta.l $2223          ; FXB: banks $30-$3F → ROM bank 3
+
+    ; BW-RAM write enable for main CPU
+    lda #$80
+    sta.l $2225
+
+    ; Set SA-1 reset vector AND IRQ vector to sa1_entry
+    lda #<sa1_entry
+    sta.l $2203          ; reset vector low
+    sta.l $2207          ; IRQ vector low
+    lda #>sa1_entry
+    sta.l $2204          ; reset vector high
+    sta.l $2208          ; IRQ vector high
+
+    ; Release SA-1 from reset + send IRQ ($A0 = bit7 + bit5)
+    lda #$A0
+    sta.l $2200
+
     rep #$20
 
     ; === Call C main() ===
@@ -164,5 +202,41 @@ VBlank:
 ;; -------------------------------------------------------
 EmptyHandler:
     rti
+
+;; -------------------------------------------------------
+;; SA-1 entry point — MUST be in bank 0 (SA-1 resets to bank $00)
+;; -------------------------------------------------------
+sa1_entry:
+    sei                  ; disable IRQs
+    clc
+    xce                  ; native mode
+    rep #$30
+    lda #$37FF
+    tcs                  ; SA-1 stack in I-RAM
+    sep #$20
+    lda #$80
+    sta $2226            ; enable BW-RAM writes from SA-1
+
+    ; Communication via BW-RAM:
+    ; $6000 = command (0=idle, 1=render)
+    ; $6001 = status (0=busy, 1=done)
+    ; $6002-$600D = player state (12 bytes)
+    ; $600E-$607D = colDrawEnd (112 bytes)
+    ; $6100+ = floor pixel buffer (39*112 = 4368 bytes)
+    rep #$10
+sa1_wait:
+    sep #$20
+    lda $6000            ; command byte in BW-RAM
+    cmp #$01
+    bne sa1_wait
+    lda #$00
+    sta $6000            ; acknowledge
+    sta $6001            ; status = busy
+    rep #$20
+    jsl sa1_renderFloor  ; render floor into BW-RAM $6100+
+    sep #$20
+    lda #$01
+    sta $6001            ; status = done
+    bra sa1_wait
 
 .ENDS

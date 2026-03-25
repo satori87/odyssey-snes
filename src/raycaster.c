@@ -57,6 +57,10 @@ extern void renderColumns(void);
 extern void clearFramebuffer(void);
 extern void dmaFramebuffer(void);
 extern void fillTestWall(void);
+extern void startSA1Floor(void);
+extern void waitSA1Floor(void);
+extern void copyFloorFromBWRAM(void);
+extern void testFillBWRAM(void);
 extern void initColumnArrays(void);
 extern void renderOneWall(void);
 extern void renderAllWalls(void);
@@ -524,8 +528,11 @@ int main(void) {
         dmaFramebuffer();   /* BlitPlay FIRST */
         handleInput();      /* d-pad movement + rotation */
         renderAllWalls();   /* re-project walls from new position */
+        renderAllWalls();   /* re-project walls from new position */
         clearFramebuffer(); /* DMA clear */
         renderColumns();    /* write walls */
+        copyFloorFromBWRAM();
+        startSA1Floor();    /* trigger SA-1 for next frame (no wait) */
     }
 
     return 0;

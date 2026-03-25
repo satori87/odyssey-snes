@@ -20,9 +20,9 @@
   SLOWROM
   LOROM
 
-  CARTRIDGETYPE $00             ; ROM only (no SuperFX)
+  CARTRIDGETYPE $35             ; SA-1 + RAM
   ROMSIZE $09                   ; 4Mbit
-  SRAMSIZE $00                  ; No SRAM
+  SRAMSIZE $05                  ; 32KB BW-RAM
   COUNTRY $01
   LICENSEECODE $00
   VERSION $00
