@@ -1,6 +1,4 @@
 ; Compiled wall scalers for heights 1-80
-; Placed directly in ROM bank 2
-; Texture column in DP $B0-$CF
 
 .BANK 2
 .ORG $0000

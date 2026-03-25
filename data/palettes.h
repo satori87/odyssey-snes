@@ -10,10 +10,10 @@
 const u16 shared_palette[16] = {
     0x0000, 0x1084, 0x14A5, 0x18C6, 0x150C, 0x0066, 0x0CEA, 0x08A9, 0x0C63, 0x18C6, 0x25B2, 0x18C6, 0x318C, 0x0087, 0x1CE7, 0x14A5
 };
-/* Colors 16-17: ceiling and floor solid (legacy) */
+/* Colors 16-17: ceiling and floor solid */
 const u16 extra_palette[2] = {
-    0x7C00,  /* 16: blue (ceiling) */
-    0x02A0   /* 17: dark green (floor) */
+    0x1084,  /* 16: dark gray ceiling (#222222) */
+    0x1CE7   /* 17: medium gray floor (#383838) */
 };
 
 /* Colors 32-47: darkened texture palette (for ceiling) */

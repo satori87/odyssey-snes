@@ -87,12 +87,16 @@ initMode7Display:
     inx
     cpx #$0004
     bne @ExPal
-    lda #18
+    ; Load dark palette at entries 32-47 (for N/S wall darkening)
+    lda #32
     sta.l $2121
-    lda #$FF
+    ldx #$0000
+@DkPal:
+    lda.l dark_palette,x
     sta.l $2122
-    lda #$03
-    sta.l $2122
+    inx
+    cpx #$0020           ; 16 colors × 2 bytes
+    bne @DkPal
 
     ; ============================================
     ; CLEAR VRAM (all words to 0)
@@ -538,14 +542,14 @@ renderColumns:
     lda.l colTexCol,x
     sta $19              ; texCol (0-31)
     lda.l colWallColor,x
-    sta $1A              ; texID (1 or 2)
+    sta $1A              ; texID (1 or 2, with possible $80 dark flag)
 
     ; --- Copy 32-byte texture column to DP $B0-$CF ---
-    ; texOffset = tex_ptrs[texID] + texCol * 32
+    ; texOffset = tex_ptrs[texID & $7F] + texCol * 32
     rep #$20
 .ACCU 16
     lda $1A
-    and #$00FF
+    and #$007F           ; mask off dark flag
     asl a                ; *2 for word index
     tax
     lda.l tex_ptrs,x     ; texture base offset within tex_base
@@ -570,6 +574,24 @@ renderColumns:
     iny
     cpy #32
     bne @CopyTex
+
+    ; Dark side: add 32 to each pixel (shift to dark palette 32-47)
+    ldx $16              ; restore col index
+    lda.l colWallColor,x
+    and #$80             ; dark flag?
+    beq @NoDarken
+    ldy #$0000
+@DarkenLoop:
+    lda $B0,y
+    beq @SkipDk          ; don't darken color 0 (black)
+    clc
+    adc #32              ; shift to dark palette
+@SkipDk:
+    sta $B0,y
+    iny
+    cpy #32
+    bne @DarkenLoop
+@NoDarken:
 
     ; --- Set WMADD = columnstart[col] + drawStart ---
     ldx $16              ; restore col index
@@ -676,7 +698,7 @@ renderColumns:
     sta $20
     lda $21
     adc $1F
-    and #$1F
+    and #$1F             ; wrap to 0-31
     sta $21
     dey
     bne @Pix
@@ -1820,9 +1842,18 @@ drawOneSeg:
     lda.l bsp_rom_data+4,x
     and #$00FF
     sta $88              ; texture (1 or 2)
+    ; Set dark flag for N/S faces (BSP dir 0 and 2 = even = bit0 clear)
+    ; Dark: texID | $80. Bright: texID.
     sep #$20
 .ACCU 8
-    sta $2A              ; store texture ID (not color) in $2A
+    sta $2A              ; texture ID
+    lda $82              ; direction (low byte)
+    and #$01             ; bit 0: 0=N/S(dark), 1=E/W(bright)
+    bne @BrightSide
+    lda $2A
+    ora #$80             ; set dark flag
+    sta $2A
+@BrightSide:
     rep #$20
 .ACCU 16
 
@@ -2167,17 +2198,320 @@ IRQTrampoline:
 
 zero_byte: .db 0
 
+;; Floor texture data (32x32, column-major)
+.include "data/floor_texture.asm"
+
+;; Row distance table: rowDist[r] = 10240 / (r+1) for r=0..38
+;; 8.8 fixed point. r=0 is first floor row (screen row 41).
+rowDist_table:
+.dw 10240, 5120, 3413, 2560, 2048, 1706, 1462, 1280
+.dw 1137, 1024, 930, 853, 787, 731, 682, 640
+.dw 602, 568, 538, 512, 487, 465, 445, 426
+.dw 409, 393, 378, 365, 353, 341, 330, 320
+.dw 311, 302, 293, 284, 277, 269, 263, 256
+
 ;; -------------------------------------------------------
-;; Playback background: 112 columns × 80 rows (ceiling/floor)
-;; Noah's Ark stores this in ROM, DMAs to screenbuffer each frame
+;; renderFloor -- software floor raycasting (row-major)
+;; For each floor row, steps across columns with linear texture interpolation.
+;; Uses: posX, posY, dirX, dirY, planeX, planeY, colDrawEnd[]
+;; Writes directly to WRAM screenbuffer via WMADD
+;; -------------------------------------------------------
+renderFloor:
+    php
+    rep #$30
+.ACCU 16
+.INDEX 16
+
+    ; Precompute leftRayDir = dir - plane
+    lda.l dirX
+    sec
+    sbc.l planeX
+    sta $B8              ; leftRayDirX
+    lda.l dirY
+    sec
+    sbc.l planeY
+    sta $BA              ; leftRayDirY
+
+    ; Precompute 2*planeX and 2*planeY (right - left ray difference)
+    lda.l planeX
+    asl a
+    sta $BC              ; 2*planeX
+    lda.l planeY
+    asl a
+    sta $BE              ; 2*planeY
+
+    ; Row loop: r = 0..38 (screen rows 41..79)
+    ldy #$0000           ; Y = row index (0-38)
+
+@RowLoop:
+    sty $C4              ; save row index
+
+    ; rowDist = rowDist_table[r]
+    tya
+    asl a                ; *2 for word index
+    tax
+    lda.l rowDist_table,x
+    sta $C0              ; rowDist
+
+    ; floorX = posX + fp_mul(rowDist, leftRayDirX)
+    tay                  ; Y = rowDist
+    lda $B8              ; A = leftRayDirX
+    jsr fp_mul_hw
+    clc
+    adc.l posX
+    sta $B0              ; floorX
+
+    ; floorY = posY + fp_mul(rowDist, leftRayDirY)
+    lda $C0
+    tay                  ; Y = rowDist
+    lda $BA              ; A = leftRayDirY
+    jsr fp_mul_hw
+    clc
+    adc.l posY
+    sta $B2              ; floorY
+
+    ; floorStepX = fp_mul(rowDist, 2*planeX) / 56
+    ; Actually: step = rowDist * 2*planeX / SCREEN_W
+    ; Approximate: fp_mul gives rowDist*2*planeX >> 8, then divide by 112
+    ; Simpler: fp_mul(rowDist, 2*planeX/112) but 2*planeX/112 might be 0
+    ; Better: compute fp_mul(rowDist, 2*planeX), then divide result by 112
+    lda $C0
+    tay
+    lda $BC              ; 2*planeX
+    jsr fp_mul_hw        ; = rowDist * 2*planeX (8.8 result)
+    ; Divide by 112 using hardware
+    sta $C6              ; save numerator
+    bpl @StepXPos
+    eor #$FFFF
+    inc a
+    sep #$20
+.ACCU 8
+    sta.l $4204
+    xba
+    sta.l $4205
+    lda #112
+    sta.l $4206
+    rep #$20
+.ACCU 16
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    lda.l $4214
+    eor #$FFFF
+    inc a
+    sta $B4              ; floorStepX (negative)
+    bra @StepXDone
+@StepXPos:
+    sep #$20
+.ACCU 8
+    sta.l $4204
+    xba
+    sta.l $4205
+    lda #112
+    sta.l $4206
+    rep #$20
+.ACCU 16
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    lda.l $4214
+    sta $B4              ; floorStepX
+@StepXDone:
+
+    ; floorStepY = fp_mul(rowDist, 2*planeY) / 112
+    lda $C0
+    tay
+    lda $BE              ; 2*planeY
+    jsr fp_mul_hw
+    sta $C6
+    bpl @StepYPos
+    eor #$FFFF
+    inc a
+    sep #$20
+.ACCU 8
+    sta.l $4204
+    xba
+    sta.l $4205
+    lda #112
+    sta.l $4206
+    rep #$20
+.ACCU 16
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    lda.l $4214
+    eor #$FFFF
+    inc a
+    sta $B6              ; floorStepY (negative)
+    bra @StepYDone
+@StepYPos:
+    sep #$20
+.ACCU 8
+    sta.l $4204
+    xba
+    sta.l $4205
+    lda #112
+    sta.l $4206
+    rep #$20
+.ACCU 16
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    lda.l $4214
+    sta $B6              ; floorStepY
+@StepYDone:
+
+    ; Column loop: half-resolution (every other column)
+    ; screenRow = 41 + rowIndex
+    lda $C4
+    clc
+    adc #41
+    sta $C2              ; screenRow
+
+    lda #$0000
+    sta $CA              ; column index
+@ColLoop:
+    ; Load column index into X for colDrawEnd check
+    ldx $CA
+
+    ; Check if this floor pixel is visible (below wall)
+    sep #$20
+.ACCU 8
+    lda $C2              ; screenRow
+    cmp.l colDrawEnd,x   ; floor visible if screenRow >= drawEnd
+    rep #$20
+.ACCU 16
+    bcc @SkipFloorPix    ; wall covers this pixel
+
+    ; Compute texture coordinates
+    lda $B0              ; floorX
+    lsr a
+    lsr a
+    lsr a
+    and #$001F
+    sta $C6              ; texU
+    lda $B2              ; floorY
+    lsr a
+    lsr a
+    lsr a
+    and #$001F
+    sta $C8              ; texV
+    ; texture offset = texU * 32 + texV
+    lda $C6
+    asl a
+    asl a
+    asl a
+    asl a
+    asl a
+    clc
+    adc $C8
+    tax
+
+    sep #$20
+.ACCU 8
+    lda.l floor_tex,x   ; read floor pixel
+    sta $C9
+
+    ; Set WMADD = columnstart[col] + screenRow
+    rep #$20
+.ACCU 16
+    lda $CA              ; column index
+    and #$00FF
+    asl a                ; *2 for word table
+    tax
+    lda.l columnstart,x
+    sta $C6              ; save column base
+    sep #$20
+.ACCU 8
+    lda $C6
+    clc
+    adc $C2              ; + screenRow
+    sta.l $2181          ; WMADDL
+    lda $C7
+    adc #$00
+    sta.l $2182          ; WMADDM
+
+    ; Write floor pixel
+    lda $C9
+    sta.l $2180
+
+    ; Also write to col+1 (half-res: duplicate pixel to neighbor)
+    lda $C6
+    clc
+    adc #80              ; columnstart[col+1] = columnstart[col] + 80
+    sta.l $2181
+    lda $C7
+    adc #$00
+    sta.l $2182
+    lda $C9
+    sta.l $2180
+
+    rep #$20
+.ACCU 16
+
+@SkipFloorPix:
+    ; Advance floor position by 2 columns (half-res)
+    lda $B0
+    clc
+    adc $B4
+    clc
+    adc $B4              ; floorX += 2 * floorStepX
+    sta $B0
+    lda $B2
+    clc
+    adc $B6
+    clc
+    adc $B6              ; floorY += 2 * floorStepY
+    sta $B2
+
+    ; Next column (step by 2)
+    lda $CA
+    clc
+    adc #2
+    sta $CA
+    cmp #112
+    bcs @ColsDone
+    jmp @ColLoop
+@ColsDone:
+
+    ; Next row (step by 2 for half-res vertical)
+    ldy $C4              ; row index
+    iny
+    iny                  ; skip every other row
+    cpy #40
+    bcs @FloorDone
+    jmp @RowLoop
+@FloorDone:
+    plp
+    rtl
+;; -------------------------------------------------------
+;; Playback background: solid ceiling + solid floor (renderFloor adds texture)
 ;; -------------------------------------------------------
 playback_bg:
 .REPT 112
-; 40 bytes ceiling
 .REPT 40
 .db CEIL_COLOR
 .ENDR
-; 40 bytes floor
 .REPT 40
 .db FLOOR_COLOR
 .ENDR
