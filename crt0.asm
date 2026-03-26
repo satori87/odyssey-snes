@@ -208,14 +208,14 @@ tcc__start:
     cpx #1024
     bcc @CpFloorTex
 
-    ; Copy rowDist_table (78 bytes) to BW-RAM $40:1C00
+    ; Copy rowDist_table (80 bytes = 40 entries) to BW-RAM $40:1C00
     ldx #$0000
 @CpRowDist:
     lda.l rowDist_table,x
     sta.l $401C00,x
     inx
     inx
-    cpx #78
+    cpx #80
     bcc @CpRowDist
 
     rep #$20
@@ -352,14 +352,14 @@ sa1_loop:
     lsr a
     and #$001F
     sta $9E
-    lda $9E
+    lda $9C              ; texU (column-major: U*32 + V)
     asl a
     asl a
     asl a
     asl a
     asl a
     clc
-    adc $9C
+    adc $9E              ; + texV
     tax
     sep #$20
 .ACCU 8
@@ -389,7 +389,7 @@ sa1_loop:
     lda $40
     inc a
     sta $40
-    cmp #39
+    cmp #40              ; 40 floor rows (viewport rows 40-79)
     bcs @LoopBack
     jmp @Row
 @LoopBack:

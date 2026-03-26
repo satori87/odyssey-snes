@@ -209,20 +209,44 @@ initMode7Display:
 
     stz $41              ; tilemap col (0-127)
 @TmC:
-    ; Default tile 0
-    lda #$00
-
-    ; Viewport: row 1-10, col 1-14
-    lda $40
-    beq @TmW             ; row 0 = border
-    cmp #11
-    bcs @TmBdr           ; row >= 11 = not viewport
+    ; Default: floor tile (repeating 4x4 pattern using tiles 226-241)
+    ; floor_tile = 226 + (col & 3) * 4 + (row & 3)
     lda $41
-    beq @TmW0            ; col 0 = border
-    cmp #15
-    bcs @TmW0            ; col >= 15 = border
+    and #$03             ; col & 3
+    asl a
+    asl a                ; (col & 3) * 4
+    sta $42
+    lda $40
+    and #$03             ; row & 3
+    clc
+    adc $42
+    clc
+    adc #226             ; + base tile = floor tile index
+    sta $43              ; save floor tile
 
-    ; Tile = (col-1)*16 + (row-1) + 1
+    ; Visible area: rows 0-13, cols 0-15 (covered by 2x zoom)
+    ; Viewport: rows 1-10, cols 1-14 → viewport tiles
+    ; HUD: rows 11-12, cols 1-14 → tile 225
+    ; Borders (row 0, row 13, cols 0, cols 15): tile 0 (black)
+    ; Off-screen (row 14+, col 16+): floor tiles for HDMA
+    lda $40
+    cmp #14
+    bcs @TmFloor         ; row >= 14 = off-screen → floor tile
+    lda $41
+    cmp #16
+    bcs @TmFloor         ; col >= 16 = off-screen → floor tile
+
+    ; Inside visible area — check what goes where
+    lda $40
+    beq @TmBlack         ; row 0 = black border
+    cmp #11
+    bcs @TmBdr           ; row >= 11 = HUD or border
+    lda $41
+    beq @TmBlack         ; col 0 = black border
+    cmp #15
+    bcs @TmBlack         ; col >= 15 = black border
+
+    ; Viewport: tile = (col-1)*16 + (row-1) + 1
     lda $41
     dec a                ; col-1 (0-13)
     asl a
@@ -239,31 +263,39 @@ initMode7Display:
     bra @TmN
 
 @TmBdr:
-    ; Rows 11-12: HUD (tile 225 for now)
+    ; Rows 11-12: HUD, row 13: black border
     lda $40
     cmp #13
-    bcs @TmW0            ; row >= 13 = bottom border
+    bcs @TmBlack         ; row >= 13 = black border
     lda $41
-    beq @TmW0
+    beq @TmBlack
     cmp #15
-    bcs @TmW0
+    bcs @TmBlack
     lda #225             ; HUD tile
     sta.l $2118
     bra @TmN
 
-@TmW0:
-    lda #$00
-@TmW:
+@TmBlack:
+    lda #$00             ; tile 0 = black
+    sta.l $2118
+    bra @TmN
+
+@TmFloor:
+    lda $43              ; floor tile (from computed pattern)
     sta.l $2118
 @TmN:
     inc $41
     lda $41
     cmp #$80
-    bne @TmC
+    beq @TmCDone
+    jmp @TmC
+@TmCDone:
     inc $40
     lda $40
     cmp #$80
-    bne @TmR
+    beq @TmRDone
+    jmp @TmR
+@TmRDone:
 
     ; ============================================
     ; TILE PIXEL DATA: write HIGH bytes only ($2119, VMAINC=$80)
@@ -338,6 +370,195 @@ initMode7Display:
     cpy #64
     bne @HudPx
 
+    ; ============================================
+    ; FLOOR TILES: Write 16 Mode 7 tiles (226-241)
+    ; Split 32x32 floor texture into 4x4 grid of 8x8 tiles
+    ; Floor texture is column-major: floor_tex[col*32 + row]
+    ; Mode 7 tiles are row-major: tile[py*8 + px]
+    ; Tile (tx,ty): pixel (px,py) = floor_tex[(tx*8+px)*32 + (ty*8+py)]
+    ; ============================================
+    rep #$20
+    lda #$0000
+    sta $40              ; ty (tile row 0-3)
+@FlTileRow:
+    lda #$0000
+    sta $42              ; tx (tile col 0-3)
+@FlTileCol:
+    ; Set VRAM address for tile (226 + ty*4 + tx)
+    ; Tile N at VRAM word N*64
+    lda $40              ; ty
+    asl a
+    asl a                ; ty*4
+    clc
+    adc $42              ; + tx
+    clc
+    adc #226             ; + base tile
+    ; Multiply by 64 (shift left 6)
+    asl a
+    asl a
+    asl a
+    asl a
+    asl a
+    asl a
+    sta.l $2116          ; VRAM word address
+    sep #$20
+    ; Write 8x8 pixel data (row-major)
+    lda #$00
+    sta $44              ; py (0-7)
+@FlPixRow:
+    lda #$00
+    sta $45              ; px (0-7)
+@FlPixCol:
+    ; Read floor_tex[(tx*8+px)*32 + (ty*8+py)]
+    ; = floor_tex[col*32 + row]
+    ; col = tx*8 + px, row = ty*8 + py
+    rep #$20
+    lda $42              ; tx
+    asl a
+    asl a
+    asl a                ; tx*8
+    sep #$20
+    clc
+    adc $45              ; + px = col (0-31)
+    rep #$20
+    and #$00FF
+    asl a
+    asl a
+    asl a
+    asl a
+    asl a                ; col*32
+    sta $46
+    lda $40              ; ty
+    asl a
+    asl a
+    asl a                ; ty*8
+    sep #$20
+    clc
+    adc $44              ; + py = row (0-31)
+    rep #$20
+    and #$00FF
+    clc
+    adc $46              ; col*32 + row = texture index
+    tax
+    sep #$20
+    lda.l floor_tex,x    ; read floor texture pixel
+    sta.l $2119          ; write to VRAM (high byte = tile pixel data)
+    inc $45
+    lda $45
+    cmp #8
+    bne @FlPixCol
+    inc $44
+    lda $44
+    cmp #8
+    bne @FlPixRow
+    rep #$20
+    inc $42
+    lda $42
+    cmp #$0004
+    bne @FlTileCol
+    inc $40
+    lda $40
+    cmp #$0004
+    bne @FlTileRow
+    sep #$20
+
+    ; === HDMA channel setup (one-time init) ===
+    ; Channel 1: M7A + M7B (mode $03, B-bus $1B = M7A write-twice)
+    lda #$03
+    sta.l $4310
+    lda #$1B
+    sta.l $4311
+    rep #$20
+    lda #hdma_m7ab
+    sta.l $4312
+    sep #$20
+    lda #:hdma_m7ab
+    sta.l $4314
+
+    ; Channel 2: M7C + M7D (mode $03, B-bus $1D)
+    lda #$03
+    sta.l $4320
+    lda #$1D
+    sta.l $4321
+    rep #$20
+    lda #hdma_m7cd
+    sta.l $4322
+    sep #$20
+    lda #:hdma_m7cd
+    sta.l $4324
+
+    ; Channel 3: HOFS + VOFS (mode $03, B-bus $0D)
+    lda #$03
+    sta.l $4330
+    lda #$0D
+    sta.l $4331
+    rep #$20
+    lda #hdma_scroll
+    sta.l $4332
+    sep #$20
+    lda #:hdma_scroll
+    sta.l $4334
+
+    ; Build initial HDMA tables (default values before first frame)
+    ; Just write wall-zone-only table: 224 scanlines of 2x zoom + end marker
+    lda #$7F             ; 127 scanlines
+    sta.l hdma_m7ab+0
+    lda #$80
+    sta.l hdma_m7ab+1    ; M7A lo
+    lda #$00
+    sta.l hdma_m7ab+2    ; M7A hi
+    sta.l hdma_m7ab+3    ; M7B lo
+    sta.l hdma_m7ab+4    ; M7B hi
+    lda #$61             ; 97 more scanlines (127+97=224)
+    sta.l hdma_m7ab+5
+    lda #$80
+    sta.l hdma_m7ab+6
+    lda #$00
+    sta.l hdma_m7ab+7
+    sta.l hdma_m7ab+8
+    sta.l hdma_m7ab+9
+    sta.l hdma_m7ab+10   ; end marker
+
+    lda #$7F
+    sta.l hdma_m7cd+0
+    lda #$00
+    sta.l hdma_m7cd+1
+    sta.l hdma_m7cd+2
+    lda #$80
+    sta.l hdma_m7cd+3
+    lda #$00
+    sta.l hdma_m7cd+4
+    lda #$61
+    sta.l hdma_m7cd+5
+    lda #$00
+    sta.l hdma_m7cd+6
+    sta.l hdma_m7cd+7
+    lda #$80
+    sta.l hdma_m7cd+8
+    lda #$00
+    sta.l hdma_m7cd+9
+    sta.l hdma_m7cd+10
+
+    lda #$7F
+    sta.l hdma_scroll+0
+    lda #$00
+    sta.l hdma_scroll+1
+    sta.l hdma_scroll+2
+    sta.l hdma_scroll+3
+    sta.l hdma_scroll+4
+    lda #$61
+    sta.l hdma_scroll+5
+    lda #$00
+    sta.l hdma_scroll+6
+    sta.l hdma_scroll+7
+    sta.l hdma_scroll+8
+    sta.l hdma_scroll+9
+    sta.l hdma_scroll+10
+
+    ; HDMA disabled — using software floor rendering instead
+    lda #$00
+    sta.l $420C
+
     ; Screen on
     lda #$0F
     sta.l $2100
@@ -384,6 +605,10 @@ blitPlay:
     lda #$80
     sta.l $2100
 
+    ; Disable HDMA during forced blank/DMA (prevents channel conflict)
+    lda #$00
+    sta.l $420C
+
     ; VMAINC=$8C: incr after $2119, address translation mode 3
     lda #$8C
     sta.l $2115
@@ -425,8 +650,18 @@ blitPlay:
 .ENDR
 .UNDEFINE _COL
 
-    ; Display on
+    ; Restore DP (DBR still $00)
+    pld                  ; -2 restore DP
+
+    ; Re-enable HDMA channels 1-3 (channels set up once in initMode7Display)
+    ; HDMA was disabled during forced blank; re-enable before screen on
+    ; HDMA disabled — software floor rendering instead
     sep #$20
+.ACCU 8
+    lda #$00
+    sta.l $420C
+
+    ; Display on
     lda #$07
     sta.l $2105
     lda #$01
@@ -434,7 +669,6 @@ blitPlay:
     lda #$0F
     sta.l $2100
 
-    pld                  ; -2 restore DP
     plb                  ; -1 restore DBR
     plp                  ; -1 restore P
     rtl
@@ -2600,7 +2834,7 @@ copyFloorFromBWRAM:
     sep #$20
 .ACCU 8
     clc
-    adc #41              ; + screen row 41
+    adc #40              ; + screen row 40 (first floor row)
     sta.l $2181
     rep #$20
 .ACCU 16
@@ -2620,8 +2854,8 @@ copyFloorFromBWRAM:
     sep #$20
 .ACCU 8
 
-    ; Write 39 floor pixels, advancing Y by 112 each time
-    lda #39
+    ; Write 40 floor pixels, advancing Y by 112 each time
+    lda #40
     sta $40              ; pixel count
 @CFPix:
     tyx                  ; X = BW-RAM offset (swap from Y for long indexed read)
@@ -2831,28 +3065,16 @@ renderFloor:
     sta $B6              ; floorStepY
 @StepYDone:
 
-    ; Column loop: half-resolution (every other column)
-    ; screenRow = 41 + rowIndex
+    ; Column loop: full resolution, every pixel
+    ; screenRow = 40 + rowIndex (row 40 = first floor row)
     lda $C4
     clc
-    adc #41
+    adc #40
     sta $C2              ; screenRow
 
     lda #$0000
     sta $CA              ; column index
 @ColLoop:
-    ; Load column index into X for colDrawEnd check
-    ldx $CA
-
-    ; Check if this floor pixel is visible (below wall)
-    sep #$20
-.ACCU 8
-    lda $C2              ; screenRow
-    cmp.l colDrawEnd,x   ; floor visible if screenRow >= drawEnd
-    rep #$20
-.ACCU 16
-    bcc @SkipFloorPix    ; wall covers this pixel
-
     ; Compute texture coordinates
     lda $B0              ; floorX
     lsr a
@@ -2866,7 +3088,7 @@ renderFloor:
     lsr a
     and #$001F
     sta $C8              ; texV
-    ; texture offset = texU * 32 + texV
+    ; texture offset = texU * 32 + texV (column-major)
     lda $C6
     asl a
     asl a
@@ -2905,55 +3127,288 @@ renderFloor:
     lda $C9
     sta.l $2180
 
-    ; Also write to col+1 (half-res: duplicate pixel to neighbor)
-    lda $C6
-    clc
-    adc #80              ; columnstart[col+1] = columnstart[col] + 80
-    sta.l $2181
-    lda $C7
-    adc #$00
-    sta.l $2182
-    lda $C9
-    sta.l $2180
-
     rep #$20
 .ACCU 16
 
-@SkipFloorPix:
-    ; Advance floor position by 2 columns (half-res)
+    ; Advance floor position by 1 column
     lda $B0
     clc
-    adc $B4
-    clc
-    adc $B4              ; floorX += 2 * floorStepX
+    adc $B4              ; floorX += floorStepX
     sta $B0
     lda $B2
     clc
-    adc $B6
-    clc
-    adc $B6              ; floorY += 2 * floorStepY
+    adc $B6              ; floorY += floorStepY
     sta $B2
 
-    ; Next column (step by 2)
+    ; Next column
     lda $CA
-    clc
-    adc #2
+    inc a
     sta $CA
     cmp #112
     bcs @ColsDone
     jmp @ColLoop
 @ColsDone:
 
-    ; Next row (step by 2 for half-res vertical)
+    ; Next row (every row)
     ldy $C4              ; row index
     iny
-    iny                  ; skip every other row
     cpy #40
     bcs @FloorDone
     jmp @RowLoop
 @FloorDone:
     plp
     rtl
+;; -------------------------------------------------------
+;; buildFloorHDMA -- compute per-frame HDMA tables for Mode 7 floor
+;;
+;; Splits screen into 3 zones via HDMA:
+;;   Wall zone  (scanlines 0-127):  M7A=$0080 M7D=$0080 (2x zoom viewport)
+;;   Floor zone (scanlines 128-175): per-scanline perspective floor
+;;   Post zone  (scanlines 176-223): M7A=$0080 M7D=$0080 (HUD/border)
+;;
+;; Floor math per scanline:
+;;   d = rowDist_table[(sy-96)/2]
+;;   M7A = fp_mul(d, planeX) >> 2     (lateral X scale)
+;;   M7C = fp_mul(d, planeY) >> 2     (lateral Y scale)
+;;   M7B = posX + fp_mul(d, lrdX) + 4096  (forward X + offset)
+;;   M7D = posY + fp_mul(d, lrdY) + 4096  (forward Y + offset)
+;;   HOFS = 0, VOFS = 32 - sy         (makes VOFS+sy=32)
+;;
+;; Floor split at scanline 128 (viewport row 56).
+;; Wall zone = 128 scanlines, floor zone = 48 scanlines.
+;;
+;; The +4096 offset ensures floor reads from tilemap area
+;; OUTSIDE the viewport (tiles 1-224) region.
+;; -------------------------------------------------------
+buildFloorHDMA:
+    php
+    rep #$30
+.ACCU 16
+.INDEX 16
+
+    ; --- Precompute per-frame ray directions ---
+    lda.l dirX
+    sec
+    sbc.l planeX
+    sta $80              ; leftRayDirX = dirX - planeX
+    lda.l dirY
+    sec
+    sbc.l planeY
+    sta $82              ; leftRayDirY = dirY - planeY
+
+    ; --- Wall zone header: 127 scanlines (max direct HDMA), constant 2x zoom ---
+    sep #$20
+.ACCU 8
+    ; Table 1 (M7A+M7B): M7A=$0080, M7B=$0000
+    lda #$7F             ; 127 scanlines
+    sta.l hdma_m7ab+0
+    lda #$80
+    sta.l hdma_m7ab+1    ; M7A lo
+    lda #$00
+    sta.l hdma_m7ab+2    ; M7A hi
+    sta.l hdma_m7ab+3    ; M7B lo
+    sta.l hdma_m7ab+4    ; M7B hi
+
+    ; Table 2 (M7C+M7D): M7C=$0000, M7D=$0080
+    lda #$7F
+    sta.l hdma_m7cd+0
+    lda #$00
+    sta.l hdma_m7cd+1    ; M7C lo
+    sta.l hdma_m7cd+2    ; M7C hi
+    lda #$80
+    sta.l hdma_m7cd+3    ; M7D lo
+    lda #$00
+    sta.l hdma_m7cd+4    ; M7D hi
+
+    ; Table 3 (HOFS+VOFS): HOFS=0, VOFS=0
+    lda #$7F
+    sta.l hdma_scroll+0
+    lda #$00
+    sta.l hdma_scroll+1
+    sta.l hdma_scroll+2
+    sta.l hdma_scroll+3
+    sta.l hdma_scroll+4
+
+    ; --- Floor zone: 48 per-scanline entries (scanlines 127-174) ---
+    rep #$30
+.ACCU 16
+.INDEX 16
+    lda #$0000
+    sta $84              ; floor scanline index (0-47)
+    ldx #5               ; table write offset (after 5-byte header)
+
+@FloorLine:
+    ; d = rowDist_table[base_row + floor_idx/2]
+    ; Floor starts at scanline 127. Viewport row = (127-16)/2 = 55.5
+    ; Rows below center = 55.5 - 40 = 15.5 → base table index = 15
+    ; Each pair of floor scanlines advances by 1 table entry
+    phx                  ; save table write offset
+    lda $84
+    lsr a                ; / 2 (pair of scanlines → one table entry)
+    clc
+    adc #15              ; base offset: row 15 below center
+    asl a                ; * 2 for word index
+    tax
+    lda.l rowDist_table,x
+    sta $86              ; d (8.8 distance)
+    plx                  ; restore table write offset
+
+    ; --- M7A = fp_mul(d, planeX) >> 2 ---
+    lda.l planeX
+    tay                  ; Y = planeX
+    lda $86              ; A = d
+    jsr fp_mul_hw        ; A = d * planeX / 256
+    ; Arithmetic shift right by 2
+    cmp #$8000
+    ror a
+    cmp #$8000
+    ror a
+    sta $88              ; M7A
+
+    ; --- M7C = fp_mul(d, planeY) >> 2 ---
+    lda.l planeY
+    tay
+    lda $86
+    jsr fp_mul_hw
+    cmp #$8000
+    ror a
+    cmp #$8000
+    ror a
+    sta $8A              ; M7C
+
+    ; --- M7B = posX + fp_mul(d, leftRayDirX) + 4096 ---
+    lda $80              ; leftRayDirX
+    tay
+    lda $86
+    jsr fp_mul_hw        ; d * leftRayDirX / 256
+    clc
+    adc.l posX           ; + posX
+    clc
+    adc #4096            ; + tilemap offset (avoids viewport area)
+    sta $8C              ; M7B
+
+    ; --- M7D = posY + fp_mul(d, leftRayDirY) + 4096 ---
+    lda $82              ; leftRayDirY
+    tay
+    lda $86
+    jsr fp_mul_hw
+    clc
+    adc.l posY
+    clc
+    adc #4096
+    sta $8E              ; M7D
+
+    ; --- VOFS = 32 - (127 + floor_idx) = -95 - floor_idx ---
+    lda #$0000
+    sec
+    sbc $84              ; - floor_idx
+    sec
+    sbc #95              ; - 95
+    sta $90              ; VOFS (signed, negative)
+
+    ; --- Write HDMA table entries ---
+    sep #$20
+.ACCU 8
+    ; Table 1: count=1, M7A_lo, M7A_hi, M7B_lo, M7B_hi
+    lda #$01
+    sta.l hdma_m7ab,x
+    lda $88
+    sta.l hdma_m7ab+1,x
+    lda $89
+    sta.l hdma_m7ab+2,x
+    lda $8C
+    sta.l hdma_m7ab+3,x
+    lda $8D
+    sta.l hdma_m7ab+4,x
+
+    ; Table 2: count=1, M7C_lo, M7C_hi, M7D_lo, M7D_hi
+    lda #$01
+    sta.l hdma_m7cd,x
+    lda $8A
+    sta.l hdma_m7cd+1,x
+    lda $8B
+    sta.l hdma_m7cd+2,x
+    lda $8E
+    sta.l hdma_m7cd+3,x
+    lda $8F
+    sta.l hdma_m7cd+4,x
+
+    ; Table 3: count=1, HOFS=0, VOFS_lo, VOFS_hi
+    lda #$01
+    sta.l hdma_scroll,x
+    lda #$00
+    sta.l hdma_scroll+1,x
+    sta.l hdma_scroll+2,x
+    lda $90
+    sta.l hdma_scroll+3,x
+    lda $91
+    sta.l hdma_scroll+4,x
+
+    ; Advance to next entry
+    rep #$20
+.ACCU 16
+    txa
+    clc
+    adc #5
+    tax
+    lda $84
+    inc a
+    sta $84
+    cmp #48              ; 48 floor scanlines (127-174)
+    bcs @FloorDone
+    jmp @FloorLine
+@FloorDone:
+
+    ; --- Post-floor zone: 49 scanlines (175-223), back to 2x zoom ---
+    sep #$20
+.ACCU 8
+    ; Table 1: M7A=$0080, M7B=$0000
+    lda #49
+    sta.l hdma_m7ab,x
+    lda #$80
+    sta.l hdma_m7ab+1,x
+    lda #$00
+    sta.l hdma_m7ab+2,x
+    sta.l hdma_m7ab+3,x
+    sta.l hdma_m7ab+4,x
+
+    ; Table 2: M7C=$0000, M7D=$0080
+    lda #49
+    sta.l hdma_m7cd,x
+    lda #$00
+    sta.l hdma_m7cd+1,x
+    sta.l hdma_m7cd+2,x
+    lda #$80
+    sta.l hdma_m7cd+3,x
+    lda #$00
+    sta.l hdma_m7cd+4,x
+
+    ; Table 3: HOFS=0, VOFS=0
+    lda #49
+    sta.l hdma_scroll,x
+    lda #$00
+    sta.l hdma_scroll+1,x
+    sta.l hdma_scroll+2,x
+    sta.l hdma_scroll+3,x
+    sta.l hdma_scroll+4,x
+
+    ; End markers
+    rep #$20
+.ACCU 16
+    txa
+    clc
+    adc #5
+    tax
+    sep #$20
+.ACCU 8
+    lda #$00
+    sta.l hdma_m7ab,x
+    sta.l hdma_m7cd,x
+    sta.l hdma_scroll,x
+
+    plp
+    rtl
+
 ;; -------------------------------------------------------
 ;; Playback background: solid ceiling + solid floor (renderFloor adds texture)
 ;; -------------------------------------------------------
@@ -2980,5 +3435,11 @@ colFullH dsb 112
 ss_top dsb 32            ; solidsegs top angles (16 entries × 2 bytes)
 ss_bot dsb 32            ; solidsegs bottom angles (16 entries × 2 bytes)
 ss_count dsb 2           ; number of solidsegs entries
+.ends
+
+.ramsection ".hdma_tables" slot 2 bank 126
+hdma_m7ab    dsb 512     ; HDMA table: M7A + M7B (mode $03, B-bus $1B)
+hdma_m7cd    dsb 512     ; HDMA table: M7C + M7D (mode $03, B-bus $1D)
+hdma_scroll  dsb 512     ; HDMA table: HOFS + VOFS (mode $03, B-bus $0D)
 .ends
 

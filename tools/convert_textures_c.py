@@ -198,7 +198,7 @@ def main():
     # Floor: floors.png tile (0,7)
     outer_wall_tile = extract_tile(walls_img, col=0, row=0)
     inner_wall_tile = extract_tile(walls_img, col=6, row=2)
-    floor_tile = extract_tile(floors_img, col=3, row=7)
+    floor_tile = extract_tile(floors_img, col=5, row=7)
 
     print(f"Outer wall: tile 1, col=0, row=0 from walls.png")
     print(f"Inner wall: tile 23, col=6, row=2 from walls.png")

@@ -34,8 +34,8 @@ typedef signed long long s32;
 #define MAX_STEPS 24
 
 /* Movement speed in 8.8 fixed point */
-#define MOVE_SPEED 60       /* movement speed */
-#define ROT_SPEED  6        /* rotation speed */
+#define MOVE_SPEED 70       /* movement speed */
+#define ROT_SPEED  7        /* rotation speed */
 
 /* Wall color indices */
 #define WALL_BRIGHT 5
@@ -64,7 +64,9 @@ extern void copyFloorFromBWRAM(void);
 extern void initColumnArrays(void);
 extern void renderOneWall(void);
 extern void renderAllWalls(void);
+extern void renderFloor(void);
 extern void testWMADD(void);
+extern void buildFloorHDMA(void);
 
 /* Player state (8.8 fixed point) */
 s16 posX;           /* position X */
@@ -525,12 +527,12 @@ int main(void) {
     renderColumns();
 
     while (1) {
-        dmaFramebuffer();       /* BlitPlay FIRST */
+        dmaFramebuffer();       /* DMA framebuffer to VRAM */
         handleInput();          /* d-pad movement + rotation */
         startSA1Floor();        /* copy player state to BW-RAM for SA-1 */
-        renderAllWalls();       /* fills column arrays */
+        renderAllWalls();       /* BSP: fills column arrays */
         clearFramebuffer();     /* solid ceiling + floor base colors */
-        copyFloorFromBWRAM();   /* copy SA-1 floor pixels to screenbuffer */
+        copyFloorFromBWRAM();   /* SA-1 floor pixels → WRAM framebuffer */
         renderColumns();        /* walls drawn LAST — overwrite floor */
     }
 
