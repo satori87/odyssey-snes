@@ -21,8 +21,10 @@
 .define FB_BASE         $2000
 .define FB_BANK         $7F
 .define FB_SIZE         8960
-.define CEIL_COLOR      16
-.define FLOOR_COLOR     17
+.define CEIL_COLOR      80
+.define FLOOR_COLOR     81
+.define FLOOR_DARK_COL  82
+.define HUD_COLOR       83
 .define MAXZ            8192
 .define CLIPSHORTANGLE  5888
 
@@ -78,13 +80,7 @@ initMode7Display:
     inx
     cpx #$0020
     bne @Pal
-    ; Load yellow at palette entry 18 (for HUD text)
-    lda #18
-    sta.l $2121
-    lda #$FF
-    sta.l $2122
-    lda #$03
-    sta.l $2122
+    ; (HUD yellow + floor gradient colors written later, after inner_pal upload)
     ; CGRAM 16-31: inner wall palette
     lda #16
     sta.l $2121
@@ -266,7 +262,7 @@ initMode7Display:
     ; Rows 11-12: HUD, row 13: black border
     lda $40
     cmp #13
-    bcs @TmBlack         ; row >= 13 = black border
+    bcs @TmBlack         ; row >= 13 = black
     lda $41
     beq @TmBlack
     cmp #15
@@ -364,7 +360,7 @@ initMode7Display:
     sep #$20
     ldy #$0000
 @HudPx:
-    lda #18              ; yellow
+    lda #HUD_COLOR       ; yellow (palette 83)
     sta.l $2119
     iny
     cpy #64
@@ -462,100 +458,31 @@ initMode7Display:
     bne @FlTileRow
     sep #$20
 
-    ; === HDMA channel setup (one-time init) ===
-    ; Channel 1: M7A + M7B (mode $03, B-bus $1B = M7A write-twice)
+    ; === UI palette entries at CGRAM 80-83 (avoids wall palette ranges) ===
+    lda #80
+    sta.l $2121          ; CGRAM address 80
+    ; Entry 80: ceiling color (dark gray) $1084
+    lda #$84
+    sta.l $2122
+    lda #$10
+    sta.l $2122
+    ; Entry 81: light floor band (light gray) $294A  R=10 G=10 B=10
+    lda #$4A
+    sta.l $2122
+    lda #$29
+    sta.l $2122
+    ; Entry 82: dark floor band (dark gray) $0C63  R=3 G=3 B=3
+    lda #$63
+    sta.l $2122
+    lda #$0C
+    sta.l $2122
+    ; Entry 83: HUD yellow $03FF
+    lda #$FF
+    sta.l $2122
     lda #$03
-    sta.l $4310
-    lda #$1B
-    sta.l $4311
-    rep #$20
-    lda #hdma_m7ab
-    sta.l $4312
-    sep #$20
-    lda #:hdma_m7ab
-    sta.l $4314
+    sta.l $2122
 
-    ; Channel 2: M7C + M7D (mode $03, B-bus $1D)
-    lda #$03
-    sta.l $4320
-    lda #$1D
-    sta.l $4321
-    rep #$20
-    lda #hdma_m7cd
-    sta.l $4322
-    sep #$20
-    lda #:hdma_m7cd
-    sta.l $4324
-
-    ; Channel 3: HOFS + VOFS (mode $03, B-bus $0D)
-    lda #$03
-    sta.l $4330
-    lda #$0D
-    sta.l $4331
-    rep #$20
-    lda #hdma_scroll
-    sta.l $4332
-    sep #$20
-    lda #:hdma_scroll
-    sta.l $4334
-
-    ; Build initial HDMA tables (default values before first frame)
-    ; Just write wall-zone-only table: 224 scanlines of 2x zoom + end marker
-    lda #$7F             ; 127 scanlines
-    sta.l hdma_m7ab+0
-    lda #$80
-    sta.l hdma_m7ab+1    ; M7A lo
-    lda #$00
-    sta.l hdma_m7ab+2    ; M7A hi
-    sta.l hdma_m7ab+3    ; M7B lo
-    sta.l hdma_m7ab+4    ; M7B hi
-    lda #$61             ; 97 more scanlines (127+97=224)
-    sta.l hdma_m7ab+5
-    lda #$80
-    sta.l hdma_m7ab+6
-    lda #$00
-    sta.l hdma_m7ab+7
-    sta.l hdma_m7ab+8
-    sta.l hdma_m7ab+9
-    sta.l hdma_m7ab+10   ; end marker
-
-    lda #$7F
-    sta.l hdma_m7cd+0
-    lda #$00
-    sta.l hdma_m7cd+1
-    sta.l hdma_m7cd+2
-    lda #$80
-    sta.l hdma_m7cd+3
-    lda #$00
-    sta.l hdma_m7cd+4
-    lda #$61
-    sta.l hdma_m7cd+5
-    lda #$00
-    sta.l hdma_m7cd+6
-    sta.l hdma_m7cd+7
-    lda #$80
-    sta.l hdma_m7cd+8
-    lda #$00
-    sta.l hdma_m7cd+9
-    sta.l hdma_m7cd+10
-
-    lda #$7F
-    sta.l hdma_scroll+0
-    lda #$00
-    sta.l hdma_scroll+1
-    sta.l hdma_scroll+2
-    sta.l hdma_scroll+3
-    sta.l hdma_scroll+4
-    lda #$61
-    sta.l hdma_scroll+5
-    lda #$00
-    sta.l hdma_scroll+6
-    sta.l hdma_scroll+7
-    sta.l hdma_scroll+8
-    sta.l hdma_scroll+9
-    sta.l hdma_scroll+10
-
-    ; HDMA disabled — using software floor rendering instead
+    ; No HDMA — gradient is baked into playback_bg ROM data
     lda #$00
     sta.l $420C
 
@@ -583,7 +510,6 @@ blitPlay:
     ; Two-phase wait: guarantee DMA starts at scanline 208 exactly.
     ; Phase 1: if we're past 208, wait until V counter wraps to < 208
     ; Phase 2: then wait until scanline reaches 208
-    ; This ensures consistent timing regardless of when game loop finishes.
 @WPre:
     lda.l $2137          ; latch H/V counters
     lda.l $213D          ; V counter low byte
@@ -598,7 +524,7 @@ blitPlay:
     sta $10
     lda.l $213D          ; high byte (reset flip-flop)
     lda $10
-    cmp #208             ; bottom border (tile row 13 = black)
+    cmp #208
     bcc @WScan           ; wait until scan >= 208
 
     ; Forced blank (bottom border is already black = invisible)
@@ -637,7 +563,7 @@ blitPlay:
     rep #$30
 .ACCU 16
 .INDEX 16
-    ldx #$0050           ; 80 (DMA length)
+    ldx #$0050           ; 80 (DMA length per column)
     ldy #$0001           ; DMA enable ch0
 
 .define _COL 0
@@ -655,7 +581,7 @@ blitPlay:
 
     ; Re-enable HDMA channels 1-3 (channels set up once in initMode7Display)
     ; HDMA was disabled during forced blank; re-enable before screen on
-    ; HDMA disabled — software floor rendering instead
+    ; No HDMA — floor gradient baked into playback_bg
     sep #$20
 .ACCU 8
     lda #$00
@@ -3159,268 +3085,41 @@ renderFloor:
     plp
     rtl
 ;; -------------------------------------------------------
-;; buildFloorHDMA -- compute per-frame HDMA tables for Mode 7 floor
-;;
-;; Splits screen into 3 zones via HDMA:
-;;   Wall zone  (scanlines 0-127):  M7A=$0080 M7D=$0080 (2x zoom viewport)
-;;   Floor zone (scanlines 128-175): per-scanline perspective floor
-;;   Post zone  (scanlines 176-223): M7A=$0080 M7D=$0080 (HUD/border)
-;;
-;; Floor math per scanline:
-;;   d = rowDist_table[(sy-96)/2]
-;;   M7A = fp_mul(d, planeX) >> 2     (lateral X scale)
-;;   M7C = fp_mul(d, planeY) >> 2     (lateral Y scale)
-;;   M7B = posX + fp_mul(d, lrdX) + 4096  (forward X + offset)
-;;   M7D = posY + fp_mul(d, lrdY) + 4096  (forward Y + offset)
-;;   HOFS = 0, VOFS = 32 - sy         (makes VOFS+sy=32)
-;;
-;; Floor split at scanline 128 (viewport row 56).
-;; Wall zone = 128 scanlines, floor zone = 48 scanlines.
-;;
-;; The +4096 offset ensures floor reads from tilemap area
-;; OUTSIDE the viewport (tiles 1-224) region.
 ;; -------------------------------------------------------
-buildFloorHDMA:
-    php
-    rep #$30
-.ACCU 16
-.INDEX 16
-
-    ; --- Precompute per-frame ray directions ---
-    lda.l dirX
-    sec
-    sbc.l planeX
-    sta $80              ; leftRayDirX = dirX - planeX
-    lda.l dirY
-    sec
-    sbc.l planeY
-    sta $82              ; leftRayDirY = dirY - planeY
-
-    ; --- Wall zone header: 127 scanlines (max direct HDMA), constant 2x zoom ---
-    sep #$20
-.ACCU 8
-    ; Table 1 (M7A+M7B): M7A=$0080, M7B=$0000
-    lda #$7F             ; 127 scanlines
-    sta.l hdma_m7ab+0
-    lda #$80
-    sta.l hdma_m7ab+1    ; M7A lo
-    lda #$00
-    sta.l hdma_m7ab+2    ; M7A hi
-    sta.l hdma_m7ab+3    ; M7B lo
-    sta.l hdma_m7ab+4    ; M7B hi
-
-    ; Table 2 (M7C+M7D): M7C=$0000, M7D=$0080
-    lda #$7F
-    sta.l hdma_m7cd+0
-    lda #$00
-    sta.l hdma_m7cd+1    ; M7C lo
-    sta.l hdma_m7cd+2    ; M7C hi
-    lda #$80
-    sta.l hdma_m7cd+3    ; M7D lo
-    lda #$00
-    sta.l hdma_m7cd+4    ; M7D hi
-
-    ; Table 3 (HOFS+VOFS): HOFS=0, VOFS=0
-    lda #$7F
-    sta.l hdma_scroll+0
-    lda #$00
-    sta.l hdma_scroll+1
-    sta.l hdma_scroll+2
-    sta.l hdma_scroll+3
-    sta.l hdma_scroll+4
-
-    ; --- Floor zone: 48 per-scanline entries (scanlines 127-174) ---
-    rep #$30
-.ACCU 16
-.INDEX 16
-    lda #$0000
-    sta $84              ; floor scanline index (0-47)
-    ldx #5               ; table write offset (after 5-byte header)
-
-@FloorLine:
-    ; d = rowDist_table[base_row + floor_idx/2]
-    ; Floor starts at scanline 127. Viewport row = (127-16)/2 = 55.5
-    ; Rows below center = 55.5 - 40 = 15.5 → base table index = 15
-    ; Each pair of floor scanlines advances by 1 table entry
-    phx                  ; save table write offset
-    lda $84
-    lsr a                ; / 2 (pair of scanlines → one table entry)
-    clc
-    adc #15              ; base offset: row 15 below center
-    asl a                ; * 2 for word index
-    tax
-    lda.l rowDist_table,x
-    sta $86              ; d (8.8 distance)
-    plx                  ; restore table write offset
-
-    ; --- M7A = fp_mul(d, planeX) >> 2 ---
-    lda.l planeX
-    tay                  ; Y = planeX
-    lda $86              ; A = d
-    jsr fp_mul_hw        ; A = d * planeX / 256
-    ; Arithmetic shift right by 2
-    cmp #$8000
-    ror a
-    cmp #$8000
-    ror a
-    sta $88              ; M7A
-
-    ; --- M7C = fp_mul(d, planeY) >> 2 ---
-    lda.l planeY
-    tay
-    lda $86
-    jsr fp_mul_hw
-    cmp #$8000
-    ror a
-    cmp #$8000
-    ror a
-    sta $8A              ; M7C
-
-    ; --- M7B = posX + fp_mul(d, leftRayDirX) + 4096 ---
-    lda $80              ; leftRayDirX
-    tay
-    lda $86
-    jsr fp_mul_hw        ; d * leftRayDirX / 256
-    clc
-    adc.l posX           ; + posX
-    clc
-    adc #4096            ; + tilemap offset (avoids viewport area)
-    sta $8C              ; M7B
-
-    ; --- M7D = posY + fp_mul(d, leftRayDirY) + 4096 ---
-    lda $82              ; leftRayDirY
-    tay
-    lda $86
-    jsr fp_mul_hw
-    clc
-    adc.l posY
-    clc
-    adc #4096
-    sta $8E              ; M7D
-
-    ; --- VOFS = 32 - (127 + floor_idx) = -95 - floor_idx ---
-    lda #$0000
-    sec
-    sbc $84              ; - floor_idx
-    sec
-    sbc #95              ; - 95
-    sta $90              ; VOFS (signed, negative)
-
-    ; --- Write HDMA table entries ---
-    sep #$20
-.ACCU 8
-    ; Table 1: count=1, M7A_lo, M7A_hi, M7B_lo, M7B_hi
-    lda #$01
-    sta.l hdma_m7ab,x
-    lda $88
-    sta.l hdma_m7ab+1,x
-    lda $89
-    sta.l hdma_m7ab+2,x
-    lda $8C
-    sta.l hdma_m7ab+3,x
-    lda $8D
-    sta.l hdma_m7ab+4,x
-
-    ; Table 2: count=1, M7C_lo, M7C_hi, M7D_lo, M7D_hi
-    lda #$01
-    sta.l hdma_m7cd,x
-    lda $8A
-    sta.l hdma_m7cd+1,x
-    lda $8B
-    sta.l hdma_m7cd+2,x
-    lda $8E
-    sta.l hdma_m7cd+3,x
-    lda $8F
-    sta.l hdma_m7cd+4,x
-
-    ; Table 3: count=1, HOFS=0, VOFS_lo, VOFS_hi
-    lda #$01
-    sta.l hdma_scroll,x
-    lda #$00
-    sta.l hdma_scroll+1,x
-    sta.l hdma_scroll+2,x
-    lda $90
-    sta.l hdma_scroll+3,x
-    lda $91
-    sta.l hdma_scroll+4,x
-
-    ; Advance to next entry
-    rep #$20
-.ACCU 16
-    txa
-    clc
-    adc #5
-    tax
-    lda $84
-    inc a
-    sta $84
-    cmp #48              ; 48 floor scanlines (127-174)
-    bcs @FloorDone
-    jmp @FloorLine
-@FloorDone:
-
-    ; --- Post-floor zone: 49 scanlines (175-223), back to 2x zoom ---
-    sep #$20
-.ACCU 8
-    ; Table 1: M7A=$0080, M7B=$0000
-    lda #49
-    sta.l hdma_m7ab,x
-    lda #$80
-    sta.l hdma_m7ab+1,x
-    lda #$00
-    sta.l hdma_m7ab+2,x
-    sta.l hdma_m7ab+3,x
-    sta.l hdma_m7ab+4,x
-
-    ; Table 2: M7C=$0000, M7D=$0080
-    lda #49
-    sta.l hdma_m7cd,x
-    lda #$00
-    sta.l hdma_m7cd+1,x
-    sta.l hdma_m7cd+2,x
-    lda #$80
-    sta.l hdma_m7cd+3,x
-    lda #$00
-    sta.l hdma_m7cd+4,x
-
-    ; Table 3: HOFS=0, VOFS=0
-    lda #49
-    sta.l hdma_scroll,x
-    lda #$00
-    sta.l hdma_scroll+1,x
-    sta.l hdma_scroll+2,x
-    sta.l hdma_scroll+3,x
-    sta.l hdma_scroll+4,x
-
-    ; End markers
-    rep #$20
-.ACCU 16
-    txa
-    clc
-    adc #5
-    tax
-    sep #$20
-.ACCU 8
-    lda #$00
-    sta.l hdma_m7ab,x
-    sta.l hdma_m7cd,x
-    sta.l hdma_scroll,x
-
-    plp
-    rtl
-
+;; Playback background: ceiling + banded floor gradient
+;; Floor uses alternating palette 81 (light) / 82 (dark)
+;; Band spacing from rowDist/32: thin at horizon, wide near player
 ;; -------------------------------------------------------
-;; Playback background: solid ceiling + solid floor (renderFloor adds texture)
-;; -------------------------------------------------------
+.define FL FLOOR_COLOR      ; light floor band (81)
+.define FD FLOOR_DARK_COL   ; dark floor band (82)
 playback_bg:
 .REPT 112
 .REPT 40
 .db CEIL_COLOR
 .ENDR
-.REPT 40
-.db FLOOR_COLOR
+; Floor rows 40-79 (row index 0-39): perspective bands
+.db FL, FL, FL, FL, FL  ; rows 0-4: light (5)
+.db FD, FD              ; rows 5-6: dark (2)
+.db FL                  ; row 7: light
+.db FD                  ; row 8: dark
+.db FL                  ; row 9: light
+.db FD                  ; row 10: dark
+.db FL, FL, FL          ; rows 11-13: light (3)
+.db FD                  ; row 14: dark
+.db FL, FL              ; rows 15-16: light (2)
+.db FD                  ; row 17: dark
+.db FL, FL              ; rows 18-19: light (2)
+.db FD                  ; row 20: dark
+.db FL                  ; row 21: light
+.db FD, FD              ; rows 22-23: dark (2)
+.db FL, FL              ; rows 24-25: light (2)
+.db FD, FD, FD          ; rows 26-28: dark (3)
+.db FL, FL, FL          ; rows 29-31: light (3)
+.db FD, FD, FD          ; rows 32-34: dark (3)
+.db FL, FL, FL, FL, FL  ; rows 35-39: light (5)
 .ENDR
-.ENDR
+.undefine FL
+.undefine FD
 
 .ends
 
@@ -3437,9 +3136,5 @@ ss_bot dsb 32            ; solidsegs bottom angles (16 entries × 2 bytes)
 ss_count dsb 2           ; number of solidsegs entries
 .ends
 
-.ramsection ".hdma_tables" slot 2 bank 126
-hdma_m7ab    dsb 512     ; HDMA table: M7A + M7B (mode $03, B-bus $1B)
-hdma_m7cd    dsb 512     ; HDMA table: M7C + M7D (mode $03, B-bus $1D)
-hdma_scroll  dsb 512     ; HDMA table: HOFS + VOFS (mode $03, B-bus $0D)
-.ends
+; (HDMA tables removed — gradient floor baked into playback_bg ROM)
 

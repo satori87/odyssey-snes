@@ -529,11 +529,9 @@ int main(void) {
     while (1) {
         dmaFramebuffer();       /* DMA framebuffer to VRAM */
         handleInput();          /* d-pad movement + rotation */
-        startSA1Floor();        /* copy player state to BW-RAM for SA-1 */
         renderAllWalls();       /* BSP: fills column arrays */
-        clearFramebuffer();     /* solid ceiling + floor base colors */
-        copyFloorFromBWRAM();   /* SA-1 floor pixels → WRAM framebuffer */
-        renderColumns();        /* walls drawn LAST — overwrite floor */
+        clearFramebuffer();     /* solid ceiling/floor colors + gradient */
+        renderColumns();        /* textured walls overwrite floor */
     }
 
     return 0;
